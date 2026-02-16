@@ -11,7 +11,7 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via email to: [your-email@example.com]
+Instead, please report them via email to: **projectmanagerpbl2025@gmail.com**
 
 You should receive a response within 48 hours. If the issue is confirmed, we will:
 1. Release a patch as soon as possible
