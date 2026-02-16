@@ -1,0 +1,26 @@
+{
+  "name": "algorand-walletconnect-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for Algorand WalletConnect dApp",
+  "main": "index.html",
+  "scripts": {
+    "build": "esbuild src/bundle-entry.js --bundle --outfile=libs/bundle.js --format=iife --global-name=AlgorandSDKs --platform=browser --target=es2020",
+    "dev": "python -m http.server 8080",
+    "start": "python -m http.server 8080"
+  },
+  "dependencies": {
+    "@perawallet/connect": "^1.5.0",
+    "algosdk": "^3.5.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.3"
+  },
+  "keywords": [
+    "algorand",
+    "walletconnect",
+    "pera-wallet",
+    "blockchain"
+  ],
+  "author": "",
+  "license": "MIT"
+}

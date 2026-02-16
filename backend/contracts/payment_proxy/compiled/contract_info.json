@@ -1,0 +1,30 @@
+{
+  "name": "PaymentProxy",
+  "description": "Payment proxy contract that forwards ALGO via inner transactions",
+  "global_schema": {
+    "num_uints": 2,
+    "num_bytes": 1
+  },
+  "local_schema": {
+    "num_uints": 0,
+    "num_bytes": 0
+  },
+  "methods": [
+    {
+      "name": "transfer",
+      "desc": "Transfer ALGO to receiver via inner transaction",
+      "args": [
+        "transfer",
+        "receiver_address"
+      ],
+      "requires_grouped_payment": true
+    },
+    {
+      "name": "stats",
+      "desc": "Get contract statistics",
+      "args": [
+        "stats"
+      ]
+    }
+  ]
+}
