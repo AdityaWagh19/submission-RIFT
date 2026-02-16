@@ -85,8 +85,8 @@ algorand_walletconnect/
 ### 1. Clone and configure
 
 ```bash
-git clone <repo-url> algorand_walletconnect
-cd algorand_walletconnect
+git clone https://github.com/AdityaWagh19/algorand-fintech-boilerplate.git
+cd algorand-fintech-boilerplate
 cp .env.example backend/.env
 ```
 
