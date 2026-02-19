@@ -1,3 +1,4 @@
+# ── Core (existing) ─────────────────────────────────────
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 py-algorand-sdk==2.6.0
@@ -5,3 +6,12 @@ python-dotenv==1.0.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
 pyteal>=0.25.0
+
+# ── V4 Additions ────────────────────────────────────────
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+alembic>=1.13.0
+python-multipart>=0.0.6
+httpx>=0.25.0
+algokit-utils>=2.0.0
+pillow>=10.0.0

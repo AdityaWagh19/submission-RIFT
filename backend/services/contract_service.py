@@ -1,14 +1,19 @@
 """
 Contract service — handles TEAL loading, compilation, deployment, and funding.
+
+V4 additions: deploy_tip_proxy, upgrade_tip_proxy, get_contract_stats,
+close_out_contract, decode_global_state.
 """
 import base64
 import json
 import logging
 import os
+from datetime import datetime
 
-from algosdk import transaction, encoding, logic
+from algosdk import transaction, encoding, logic, account
 
 from algorand_client import algorand_client
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +146,14 @@ def create_deploy_txn(sender: str, contract_name: str) -> dict:
     }
 
 
-def create_fund_txn(sender: str, app_id: int, amount: int = 200_000) -> dict:
+def create_fund_txn(sender: str, app_id: int, amount: int = 100_000) -> dict:
     """
     Create an unsigned PaymentTxn to fund a deployed contract.
 
     Args:
         sender: Funder wallet address
         app_id: Deployed application ID
-        amount: Amount in microAlgos (default 0.2 ALGO)
+        amount: Amount in microAlgos (default 0.1 ALGO)
 
     Returns:
         Dict with unsigned transaction and contract address
@@ -174,3 +179,252 @@ def create_fund_txn(sender: str, app_id: int, amount: int = 200_000) -> dict:
         "appAddress": app_address,
         "amount": amount,
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# V4 — TipProxy Contract Management
+# ════════════════════════════════════════════════════════════════════
+
+
+def _get_platform_account() -> dict:
+    """
+    Get the platform wallet's private key and address.
+
+    Security fix H4: Uses settings.platform_private_key (cached)
+    instead of re-deriving from mnemonic on every call.
+
+    Returns:
+        dict with 'address' and 'private_key'
+    """
+    private_key = settings.platform_private_key  # Cached in config.py
+    address = account.address_from_private_key(private_key)
+    return {"address": address, "private_key": private_key}
+
+
+def deploy_tip_proxy(creator_wallet: str, min_tip_algo: float = 1.0) -> dict:
+    """
+    Deploy a new TipProxy smart contract for a creator.
+
+    1. Loads compiled TipProxy TEAL
+    2. Creates ApplicationCreateTxn with creator + platform as app args
+    3. Signs with platform wallet and submits
+    4. Funds the contract with minimum balance (0.1 ALGO)
+    5. Returns {app_id, app_address, version, min_tip_algo}
+
+    Args:
+        creator_wallet: Creator's Algorand address (set as contract owner)
+        min_tip_algo: Minimum tip amount in ALGO (default: 1.0, range: 0.1 - 1000)
+
+    Returns:
+        dict: {app_id, app_address, version, min_tip_algo}
+    """
+    platform = _get_platform_account()
+    client = algorand_client.client
+
+    # Validate min_tip_algo range
+    if min_tip_algo < 0.1 or min_tip_algo > 1000.0:
+        raise ValueError(f"min_tip_algo must be between 0.1 and 1000 ALGO, got {min_tip_algo}")
+
+    # Convert ALGO to microAlgos
+    min_tip_micro = int(min_tip_algo * 1_000_000)
+
+    logger.info(f"Deploying TipProxy for creator {creator_wallet[:8]}... (min_tip: {min_tip_algo} ALGO)")
+
+    # Load and compile TEAL
+    approval_teal = load_teal("tip_proxy", "approval.teal")
+    clear_teal = load_teal("tip_proxy", "clear.teal")
+
+    approval_compiled = client.compile(approval_teal)
+    clear_compiled = client.compile(clear_teal)
+
+    approval_program = base64.b64decode(approval_compiled["result"])
+    clear_program = base64.b64decode(clear_compiled["result"])
+
+    # Global schema: 5 uints + 2 bytes (from contract spec)
+    global_schema = transaction.StateSchema(num_uints=5, num_byte_slices=2)
+    local_schema = transaction.StateSchema(num_uints=0, num_byte_slices=0)
+
+    # Suggested params
+    sp = client.suggested_params()
+    sp.fee = max(sp.fee, 2000)  # extra fee covers inner txn
+    sp.flat_fee = True
+
+    # App args: [creator_address_raw, platform_address_raw, min_tip_amount, version]
+    txn = transaction.ApplicationCreateTxn(
+        sender=platform["address"],
+        sp=sp,
+        on_complete=transaction.OnComplete.NoOpOC,
+        approval_program=approval_program,
+        clear_program=clear_program,
+        global_schema=global_schema,
+        local_schema=local_schema,
+        app_args=[
+            encoding.decode_address(creator_wallet),       # 32 bytes: creator address
+            encoding.decode_address(platform["address"]),  # 32 bytes: platform address
+            min_tip_micro.to_bytes(8, "big"),               # 8 bytes: min tip (creator-configurable)
+            (1).to_bytes(8, "big"),                        # 8 bytes: version = 1
+        ],
+    )
+
+
+    # Sign and submit
+    signed_txn = txn.sign(platform["private_key"])
+    tx_id = client.send_transaction(signed_txn)
+    logger.info(f"  TipProxy deploy txn sent: {tx_id}")
+
+    result = transaction.wait_for_confirmation(client, tx_id, 4)
+    app_id = result["application-index"]
+    app_address = logic.get_application_address(app_id)
+
+    logger.info(f"  TipProxy deployed — App ID: {app_id}, Address: {app_address[:8]}...")
+
+    # Fund the contract with minimum balance so it can send inner txns
+    fund_amount = settings.contract_fund_amount
+    fund_sp = client.suggested_params()
+    fund_sp.fee = max(fund_sp.fee, 1000)
+    fund_sp.flat_fee = True
+
+    fund_txn = transaction.PaymentTxn(
+        sender=platform["address"],
+        sp=fund_sp,
+        receiver=app_address,
+        amt=fund_amount,
+    )
+    signed_fund = fund_txn.sign(platform["private_key"])
+    fund_tx_id = client.send_transaction(signed_fund)
+    transaction.wait_for_confirmation(client, fund_tx_id, 4)
+    logger.info(f"  TipProxy funded with {fund_amount} microALGO")
+
+    return {
+        "app_id": app_id,
+        "app_address": app_address,
+        "version": 1,
+        "min_tip_algo": min_tip_algo,
+        "tx_id": tx_id,
+    }
+
+
+def upgrade_tip_proxy(
+    creator_wallet: str,
+    old_app_id: int,
+    old_version: int,
+    min_tip_algo: float = 1.0,
+) -> dict:
+    """
+    Deploy a new TipProxy version for a creator, replacing the old one.
+
+    1. Deploys a fresh TipProxy with the same min_tip setting
+    2. Returns the new contract info (caller updates DB)
+
+    Args:
+        creator_wallet: Creator's Algorand address
+        old_app_id: The app_id being replaced
+        old_version: Current version number
+        min_tip_algo: Min tip amount to preserve from old contract
+
+    Returns:
+        dict: {app_id, app_address, version, min_tip_algo}
+    """
+    logger.info(f"Upgrading TipProxy for {creator_wallet[:8]}... (v{old_version} → v{old_version + 1})")
+
+    new_contract = deploy_tip_proxy(creator_wallet, min_tip_algo=min_tip_algo)
+    new_contract["version"] = old_version + 1
+
+    logger.info(f"  New TipProxy: App ID {new_contract['app_id']} (v{new_contract['version']})")
+
+    return new_contract
+
+
+def close_out_contract(old_app_id: int, creator_wallet: str) -> str | None:
+    """
+    Delete an old TipProxy contract and return remaining ALGO to creator.
+
+    Args:
+        old_app_id: Application ID to delete
+        creator_wallet: Address to receive remaining ALGO
+
+    Returns:
+        Transaction ID of the delete, or None on failure
+    """
+    platform = _get_platform_account()
+    client = algorand_client.client
+
+    try:
+        sp = client.suggested_params()
+        sp.fee = max(sp.fee, 1000)
+        sp.flat_fee = True
+
+        txn = transaction.ApplicationDeleteTxn(
+            sender=platform["address"],
+            sp=sp,
+            index=old_app_id,
+        )
+
+        signed_txn = txn.sign(platform["private_key"])
+        tx_id = client.send_transaction(signed_txn)
+        transaction.wait_for_confirmation(client, tx_id, 4)
+
+        logger.info(f"  Old TipProxy {old_app_id} deleted. Remaining ALGO returned to creator.")
+        return tx_id
+
+    except Exception as e:
+        logger.warning(f"  Failed to close out contract {old_app_id}: {e}")
+        return None
+
+
+def decode_global_state(global_state: list) -> dict:
+    """
+    Decode Algorand application global state from the raw format.
+
+    The Algorand API returns global state as a list of
+    {key: base64, value: {bytes: base64, uint: int, type: int}}.
+
+    Args:
+        global_state: Raw global-state list from algod application_info()
+
+    Returns:
+        dict mapping human-readable key names to decoded values
+    """
+    result = {}
+    for item in global_state:
+        key = base64.b64decode(item["key"]).decode("utf-8", errors="ignore")
+        value = item["value"]
+
+        if value["type"] == 1:
+            # bytes value
+            result[key] = base64.b64decode(value.get("bytes", ""))
+        elif value["type"] == 2:
+            # uint value
+            result[key] = value.get("uint", 0)
+        else:
+            result[key] = value
+
+    return result
+
+
+def get_contract_stats(app_id: int) -> dict:
+    """
+    Read on-chain global state from a TipProxy contract.
+
+    Returns:
+        dict: {total_tips, total_amount_algo, min_tip_algo, paused, contract_version}
+    """
+    client = algorand_client.client
+
+    try:
+        app_info = client.application_info(app_id)
+        raw_state = app_info.get("params", {}).get("global-state", [])
+        global_state = decode_global_state(raw_state)
+
+        return {
+            "app_id": app_id,
+            "total_tips": global_state.get("total_tips", 0),
+            "total_amount_algo": global_state.get("total_amount", 0) / 1_000_000,
+            "min_tip_algo": global_state.get("min_tip_amount", 1_000_000) / 1_000_000,
+            "paused": bool(global_state.get("paused", 0)),
+            "contract_version": global_state.get("contract_version", 1),
+        }
+    except Exception as e:
+        logger.error(f"Failed to read contract stats for app {app_id}: {e}")
+        raise
+

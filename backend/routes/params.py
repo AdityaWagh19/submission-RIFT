@@ -54,5 +54,5 @@ async def get_transaction_params():
         logger.error(f"Error fetching transaction parameters: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Unable to fetch transaction parameters: {str(e)}",
+            detail="Unable to fetch transaction parameters. Check server logs.",
         )

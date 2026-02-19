@@ -3,7 +3,7 @@ Smart contract compiler — compiles PyTeal contracts to TEAL.
 
 Usage:
     python -m contracts.compile                   # Compiles all contracts
-    python -m contracts.compile payment_proxy     # Compiles a specific contract
+    python -m contracts.compile tip_proxy          # Compiles a specific contract
 """
 import importlib
 import json

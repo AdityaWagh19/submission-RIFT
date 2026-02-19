@@ -26,10 +26,10 @@ async def submit_transaction(request: SubmitTransactionRequest):
         return SubmitTransactionResponse(txId=tx_id)
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid transaction format")
     except Exception as e:
         code, detail = transaction_service.classify_error(str(e))
-        raise HTTPException(status_code=code, detail=detail)
+        raise HTTPException(status_code=code, detail="Transaction submission failed. Check server logs.")
 
 
 @router.post("/submit-group", response_model=SubmitTransactionResponse)
@@ -41,7 +41,7 @@ async def submit_group(request: SubmitMultiTxnRequest):
         return SubmitTransactionResponse(txId=tx_id)
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid group transaction format")
     except Exception as e:
         code, detail = transaction_service.classify_error(str(e))
-        raise HTTPException(status_code=code, detail=detail)
+        raise HTTPException(status_code=code, detail="Group transaction submission failed. Check server logs.")
