@@ -25,6 +25,18 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# TODO FOR JULES:
+# 1. Replace X-Wallet-Address header check with Ed25519 signature verification:
+#    a. Add GET /auth/challenge endpoint that returns a random nonce (store server-side with 5-min TTL)
+#    b. Frontend signs nonce with Pera Wallet private key → sends signature + wallet address
+#    c. Backend verifies Ed25519 signature against wallet's public key using algosdk.encoding
+#    d. On success, issue a short-lived JWT token (15-min expiry) for subsequent requests
+# 2. Add session management — store JWT in httpOnly cookie or Authorization header
+# 3. Add rate limiting on /auth/challenge (prevent nonce flooding)
+# 4. Support both TestNet and MainNet address validation
+# 5. Add wallet rotation support — allow user to migrate to new wallet
+# END TODO
+
 
 async def require_wallet_auth(
     wallet: str = Path(..., description="Algorand wallet address"),

@@ -17,6 +17,19 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# TODO FOR JULES:
+# 1. Add idempotent deployment pattern (prevent orphaned on-chain contracts):
+#    a. Generate unique deployment ID before on-chain call
+#    b. Store as 'pending' in DB before deploying
+#    c. Update to 'active' after on-chain confirmation
+#    d. On retry, check for existing 'pending' deployment and recover
+# 2. Cache compiled TEAL in memory (currently reads from disk every deployment)
+# 3. Add contract factory pattern — precompute approval/clear programs once per version
+# 4. Add network abstraction — validate chain genesis hash on startup, block MainNet
+#    if SIMULATION_MODE or DEMO_MODE is enabled
+# 5. Add contract upgrade migration — preserve state when upgrading TipProxy versions
+# END TODO
+
 # Path to contracts directory
 CONTRACTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts")
 

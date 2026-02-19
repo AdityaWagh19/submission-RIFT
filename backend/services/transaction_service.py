@@ -8,6 +8,19 @@ from algorand_client import algorand_client
 
 logger = logging.getLogger(__name__)
 
+# TODO FOR JULES:
+# 1. Add type safety — use Pydantic models for all inputs/outputs instead of raw strings
+# 2. Add wait_for_confirmation() wrapper with configurable timeout + retry
+#    - Currently the frontend has no way to know if a txn was confirmed
+#    - Return confirmed round number and asset-id (for NFT mints)
+# 3. Add idempotency key support to prevent duplicate submissions:
+#    - Accept optional X-Idempotency-Key header
+#    - Cache recent tx_ids by idempotency key (5-min TTL)
+#    - Return cached result on duplicate key instead of resubmitting
+# 4. Add atomic group validation — verify group ID matches across all txns before submission
+# 5. Add transaction simulation (algod.dryrun) before submission to catch errors early
+# END TODO
+
 
 def fix_base64_padding(b64_str: str) -> str:
     """Ensure proper base64 padding (must be multiple of 4)."""

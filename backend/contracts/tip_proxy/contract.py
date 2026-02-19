@@ -22,6 +22,18 @@ Global State:
     paused            (uint)   — 0 = active, 1 = paused
 """
 
+# TODO FOR JULES:
+# 1. Migrate from raw PyTeal to ARC-4 ABI method routing (use abi.Router)
+#    - Replace manual Bytes("tip") selectors with @router.method decorators
+#    - Add proper ABI type hints for all method args and returns
+#    - Generate contract.json ABI description for frontend SDK
+# 2. Add reentrancy guard on tip() — prevent recursive inner txn attacks
+# 3. Add max_tip_amount validation (prevent accidental huge tips, e.g. 10000 ALGO cap)
+# 4. Add withdraw_excess() method for platform to reclaim minimum balance if contract closes
+# 5. Consider Box storage for on-chain tip history (last N tips per creator)
+# 6. Add event emission using ARC-28 standard instead of raw Log()
+# END TODO
+
 from pyteal import *
 
 # ── Contract Metadata (read by compiler) ──────────────────────────

@@ -36,6 +36,19 @@ from database import async_session
 
 logger = logging.getLogger(__name__)
 
+# TODO FOR JULES:
+# 1. Migrate minting from synchronous (blocks event loop ~4.5s/mint) to task queue:
+#    - Option A: Celery + Redis broker (mature, well-documented)
+#    - Option B: ARQ (async-native, lighter weight, better for this project)
+#    - Listener enqueues mint tasks → workers process independently
+# 2. Add heartbeat mechanism — update timestamp every poll cycle
+#    - Health endpoint returns "unhealthy" if heartbeat stale (> 2x poll interval)
+#    - Auto-restart listener task on detected hang
+# 3. Add WebSocket support to push real-time tip notifications to connected frontend clients
+# 4. Add retry with exponential backoff for failed Indexer queries (currently linear)
+# 5. Add Prometheus metrics: tips_processed_total, mint_duration_seconds, listener_lag_rounds
+# END TODO
+
 # ════════════════════════════════════════════════════════════════════
 # Demo Mode — Fan Private Key Resolver
 # ════════════════════════════════════════════════════════════════════
