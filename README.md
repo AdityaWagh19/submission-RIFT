@@ -1,188 +1,142 @@
-# FanForge — Algorand NFT Tipping & Creator Economy Platform
+# FanForge — Creator Economy Platform on Algorand
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Algorand](https://img.shields.io/badge/Algorand-TestNet-00D1B2.svg)](https://developer.algorand.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-4.0-009688.svg)](https://fastapi.tiangolo.com/)
-[![Security Hardened](https://img.shields.io/badge/Security-Hardened-brightgreen.svg)](#security)
-[![Pera Wallet](https://img.shields.io/badge/Wallet-Pera-6C5CE7.svg)](https://perawallet.app/)
+> **Fans tip creators with ALGO. Creators reward fans with collectible NFT stickers.**
+> Full-stack Web3 platform with per-creator smart contracts, three NFT types, a merch store with token-gated discounts, and a fiat on-ramp.
 
-> **A full-stack Web3 tipping platform on Algorand.**
-> Fans tip creators through per-creator smart contracts and automatically earn NFT sticker rewards — soulbound collectibles and tradable golden stickers — all powered by on-chain events and IPFS metadata.
-
----
-
-## Table of Contents
-
-- [What This Project Does](#what-this-project-does)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Quick Start](#quick-start)
-- [Frontend](#frontend)
-- [Security](#security)
-- [TipProxy Smart Contract](#tipproxy-smart-contract)
-- [Minting Pipeline](#minting-pipeline-listener)
-- [API Reference](#api-reference-30-endpoints)
-- [Architecture](#architecture)
-- [Database Schema](#database-schema)
-- [Environment Variables](#environment-variables)
-- [Tech Stack](#tech-stack)
-- [Development History](#development-history)
-- [Production Roadmap](#production-roadmap)
-- [License](#license)
+[![Built on Algorand](https://img.shields.io/badge/Built_on-Algorand-black?style=flat-square&logo=algorand)](https://algorand.co)
+[![Python 3.13+](https://img.shields.io/badge/Python-3.13+-blue?style=flat-square&logo=python)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite)](https://vite.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 ---
 
-## What This Project Does
+## What is FanForge?
 
-When a fan sends ALGO to a creator, the platform:
+FanForge is a non-custodial creator economy platform where:
 
-1. **Routes the tip** through a per-creator **TipProxy smart contract** (atomic group transaction: payment + app call)
-2. **The smart contract validates** the tip (minimum amount, contract not paused) and **forwards ALGO** to the creator via an inner transaction
-3. **The backend listener** polls the Algorand Indexer, detects the tip event from the on-chain log
-4. **Automatically mints** the correct NFT sticker based on the tip amount (threshold-based template matching)
-5. **Transfers the NFT** to the fan's wallet (auto opt-in + clawback transfer in demo mode)
+- **Fans** tip creators with ALGO and earn collectible NFT stickers
+- **Creators** deploy smart contracts (TipProxy) and design custom sticker rewards
+- **Everything** runs on Algorand TestNet — transparent, instant, trustless
 
-All of this happens **end-to-end, in one fluent flow** — no manual steps required.
+### The 3-NFT System
 
-### Sticker System (Fully Creator-Customizable)
-
-Creators configure their own sticker tiers via the API — custom names, images, thresholds, and types:
-
-| Setting | Range / Options | Description |
-|---------|----------------|-------------|
-| **Name** | Any (up to 200 chars) | Display name for the sticker |
-| **Image** | Any image (up to 5 MB) | Custom artwork uploaded to IPFS |
-| **Threshold** | 0.1 – 10,000 ALGO | Minimum tip amount to earn this sticker |
-| **Type** | `soulbound` or `golden` | Non-transferable vs tradable |
-| **Min Tip** | 0.1 – 1,000 ALGO | Smart contract minimum (set at registration) |
-
-**Example configuration** (from the demo):
-
-| Threshold | Sticker | Type |
-|-----------|---------|------|
-| ≥ 1 ALGO | Butki | 🔒 Soulbound |
-| ≥ 2 ALGO | Bauni | 🔒 Soulbound |
-| ≥ 5 ALGO | Shawty | ⭐ Golden (tradable) |
-
-Creators can have up to **20 sticker templates**. Each threshold + type combination must be unique per creator.
+| NFT Type | Name | How to Earn | Properties |
+|----------|------|-------------|------------|
+| 🏆 **Butki** | Loyalty Badge | Tip 5 times → earn 1 badge | Soulbound, non-transferable |
+| 🎫 **Bauni** | Membership | Purchase for 1 ALGO | Soulbound, 30-day expiry |
+| 🌟 **Shawty** | Collectible | Purchase for 2 ALGO | Golden, fully transferable |
 
 ---
 
-## Features
+## Architecture
 
-### Core Platform
-- **Per-creator TipProxy smart contracts** — each creator gets a unique on-chain tip jar (PyTeal → TEAL)
-- **Atomic group transactions** — payment + app call executed atomically (both succeed or both fail)
-- **Creator-configurable min tip** — each creator sets their own minimum tip amount (0.1–1000 ALGO) during registration, enforced on-chain
-
-### NFT Sticker Engine
-- **Fully customizable sticker tiers** — creators define their own names, images, thresholds (0.1–10k ALGO), and types (up to 20 templates per creator)
-- **Dual NFT economy** — soulbound stickers (`default_frozen=True`, non-transferable) + golden collectibles (`default_frozen=False`, tradable)
-- **Custom sticker images** — creators upload their own artwork via the API; stored on IPFS with ARC-3 metadata
-- **IPFS storage** — sticker images and metadata stored on Pinata IPFS
-
-### Backend Services
-- **Transaction listener** — background service polls Indexer for on-chain tip events, triggers minting pipeline
-- **Security hardened** — wallet authentication, rate limiting, address validation, error sanitization (12 fixes from security audit)
-- **Demo mode** — automatic opt-in + transfer using stored fan keys (production uses Pera Wallet)
-- **Membership tiers** — Bronze (30 days) / Silver (90 days) / Gold (365 days)
-- **Leaderboards** — per-creator fan rankings and global top creators
-- **Fiat on-ramp** — simulated ALGO funding (Transak integration ready for production)
-- **Alembic migrations** — database versioned with Alembic for safe schema evolution
-
-### Frontend (9 Screens)
-- **Landing Page** — hero section, live metrics, feature cards, sticker breakdown
-- **Creator Setup Wizard** — 4-step onboarding: Connect → Deploy → Upload Stickers → Share Link
-- **Fan Tip Page** — sticker gallery, tip form, golden odds preview, transaction progress
-- **Creator Dashboard** — analytics, sticker management, top fans, contract controls, system status
-- **Fan Dashboard** — tipping stats, recent tips, creators supported, golden odds, balance
-- **Sticker Inventory** — NFT gallery grid, filter tabs, detail modal, golden transfer
-- **Add Balance** — simulation faucet, quick-pick amounts, success card, session history
-- **Leaderboard** — top creators table, per-creator fan ranking, search & filter
-- **About & 404** — how it works, FAQ accordion, clean 404 page
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Frontend (React + Vite)           http://localhost:5173        │
+│  ├── Pera Wallet Connect (wallet signing)                      │
+│  ├── 6 Pages: Landing, Creator Hub, Fan Hub, Store, Explore, Tip│
+│  └── JWT Auth + 8 API service modules (62 endpoints mapped)    │
+├─────────────────────────────────────────────────────────────────┤
+│  Backend (FastAPI + Python 3.13)   http://localhost:8000        │
+│  ├── 30+ REST endpoints with JWT authentication                │
+│  ├── On-chain listener (polls Algorand every 10s)              │
+│  ├── NFT minting pipeline (Pinata IPFS → ARC-3 mint)          │
+│  └── SQLite + SQLAlchemy async ORM                             │
+├─────────────────────────────────────────────────────────────────┤
+│  Algorand TestNet                  AlgoNode Cloud              │
+│  ├── TipProxy smart contracts (per-creator)                    │
+│  ├── ASA NFTs (ARC-3 metadata)                                 │
+│  └── Atomic transaction groups (app call + payment)            │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## Project Structure
 
 ```
-algorand_creator_project/
-├── README.md                           ← This file
-├── CONTRIBUTING.md                     ← Contribution guidelines
-├── SECURITY.md                         ← Security policy & reporting
-├── LICENSE                             ← MIT License
-├── .gitignore
+algorand_creator_project_onramp/
 │
-├── docs/
-│   ├── FRONTEND_PLAN.md                ← Complete frontend specification (10 pages)
-│   ├── BACKEND_INTEGRATION_PLAN.md     ← Screen-by-screen backend wiring plan
-│   ├── BACKEND_SECURITY_AUDIT.md       ← 23-finding security audit + fix status
-│   ├── PRODUCTION_ROADMAP.md           ← Known gaps & production migration guide
-│   └── transak_onramp_flow.md          ← Fiat-to-crypto onramp documentation
+├── frontend/                        # React + Vite SPA
+│   ├── package.json
+│   ├── vite.config.js               # Node polyfills for algosdk
+│   └── src/
+│       ├── main.jsx                 # Entry point
+│       ├── App.jsx                  # 6 routes + context providers
+│       ├── index.css                # Full design system (dark mode, glassmorphism)
+│       │
+│       ├── api/                     # Backend API service layer
+│       │   ├── client.js            # Base fetch wrapper with JWT
+│       │   ├── auth.js              # Challenge/verify flow
+│       │   ├── creator.js           # 17 creator endpoints
+│       │   ├── fan.js               # 5 fan endpoints
+│       │   ├── nft.js               # 6 NFT endpoints
+│       │   ├── loyalty.js           # Butki(3) + Bauni(3) + Shawty(6)
+│       │   ├── merch.js             # Store catalog, quote, order
+│       │   ├── leaderboard.js       # 2 leaderboard endpoints
+│       │   └── system.js            # Health, params, onramp, submit
+│       │
+│       ├── context/                 # React context providers
+│       │   ├── AuthContext.jsx      # JWT + wallet + role management
+│       │   ├── WalletContext.jsx    # Pera Wallet SDK wrapper
+│       │   └── ToastContext.jsx     # Toast notification system
+│       │
+│       ├── components/              # Shared UI components
+│       │   ├── Navbar.jsx           # Wallet badge, role pill, nav links
+│       │   ├── TabPanel.jsx         # Reusable tabbed interface
+│       │   └── Modal.jsx            # Generic modal dialog
+│       │
+│       ├── pages/                   # 6 core pages
+│       │   ├── Landing.jsx          # Hero, NFT showcase, connect, fund
+│       │   ├── CreatorHub.jsx       # Dashboard, templates, products, contract
+│       │   ├── FanHub.jsx           # NFTs, loyalty, Shawty, stats
+│       │   ├── Store.jsx            # Catalog, cart, checkout, orders
+│       │   ├── Explore.jsx          # Global leaderboard, creator detail
+│       │   └── Tip.jsx              # Tip form with real algosdk txns
+│       │
+│       └── utils/
+│           └── helpers.js           # Wallet truncation, date formatting
 │
-└── backend/
-    ├── main.py                         ← FastAPI app + listener lifespan
-    ├── config.py                       ← Settings from .env + production validation
-    ├── algorand_client.py              ← Algod singleton client
-    ├── database.py                     ← SQLAlchemy async engine + session
-    ├── db_models.py                    ← 7 ORM tables (User → ListenerState)
-    ├── models.py                       ← Pydantic request/response models
-    ├── exceptions.py                   ← Custom exception classes
-    ├── requirements.txt                ← Python dependencies
-    ├── .env.example                    ← Template for .env (secrets placeholders)
-    ├── alembic.ini                     ← Alembic migration config
-    │
-    ├── alembic/                         ← Database migrations
-    │   ├── env.py
-    │   ├── script.py.mako
-    │   └── versions/                   ← Migration scripts
-    │
-    ├── middleware/                       ← Security middleware
-    │   ├── auth.py                     ← Wallet authentication (X-Wallet-Address)
-    │   └── rate_limit.py               ← In-memory sliding-window rate limiting
-    │
-    ├── utils/                           ← Shared utilities
-    │   └── validators.py               ← Algorand address validation (58-char, checksum)
-    │
-    ├── routes/                          ← API route handlers (8 modules, 30+ endpoints)
-    │   ├── health.py                   ← GET /health
-    │   ├── params.py                   ← GET /params (60s cache)
-    │   ├── transactions.py             ← POST /submit, /submit-group
-    │   ├── contracts.py                ← Contract info + listing
-    │   ├── creator.py                  ← Registration, templates, dashboard, contract mgmt
-    │   ├── nft.py                      ← NFT minting, transfer, opt-in, inventory
-    │   ├── fan.py                      ← Fan stats, inventory, leaderboards
-    │   └── onramp.py                   ← On-ramp: simulation faucet + Transak webhook
-    │
-    ├── services/                        ← Business logic layer (8 services)
-    │   ├── listener_service.py         ← Indexer polling + threshold-based minting pipeline
-    │   ├── nft_service.py              ← Mint soulbound/golden, transfer, opt-in
-    │   ├── contract_service.py         ← TEAL loading, deploy, fund
-    │   ├── ipfs_service.py             ← Pinata image + ARC-3 metadata upload
-    │   ├── transak_service.py          ← Transak webhook + ALGO delivery routing
-    │   ├── probability_service.py      ← Golden sticker chance engine
-    │   ├── membership_service.py       ← Bronze/Silver/Gold tier definitions
-    │   └── transaction_service.py      ← Transaction submission + error classification
-    │
-    ├── contracts/                       ← PyTeal smart contracts
-    │   ├── compile.py                  ← Compiler (python -m contracts.compile)
-    │   └── tip_proxy/                  ← V4 TipProxy smart contract
-    │       └── contract.py             ← PyTeal source (4 methods: tip, update_min_tip, pause, unpause)
-    │
-    ├── sticker_scripts/                 ← Low-level NFT operations (used by nft_service)
-    │   ├── utils.py                    ← Mnemonic → account derivation
-    │   ├── mint_soulbound.py           ← Soulbound NFT (default_frozen=True)
-    │   ├── mint_golden.py              ← Golden NFT (default_frozen=False, tradable)
-    │   ├── optin_asset.py              ← ASA opt-in helper
-    │   └── transfer_nft.py             ← NFT transfer helper
-    │
-    └── scripts/                         ← Development & testing utilities
-        ├── generate_accounts.py        ← Generate demo creator + fan accounts
-        ├── run_demo.py                 ← Full demo: register, deploy, fund, tip, mint
-        ├── test_security_fixes.py      ← 23 security verification tests
-        ├── test_all_endpoints.py       ← 28 endpoint smoke tests
-        └── migrate_add_delivery_status.py ← DB migration helper
+├── backend/                         # FastAPI Python backend
+│   ├── main.py                      # App entry point + lifespan
+│   ├── config.py                    # pydantic-settings (.env loader)
+│   ├── database.py                  # SQLAlchemy async engine
+│   ├── db_models.py                 # 10 ORM models
+│   ├── models.py                    # 31 Pydantic request/response schemas
+│   ├── algorand_client.py           # Singleton algod client
+│   ├── requirements.txt
+│   │
+│   ├── contracts/                   # PyTeal smart contracts
+│   │   ├── compile.py
+│   │   ├── tip_proxy/               # Per-creator tip jar contract
+│   │   └── nft_controller/          # NFT management contract
+│   │
+│   ├── routes/                      # API endpoints (30+)
+│   │   ├── auth.py                  # JWT wallet authentication
+│   │   ├── health.py                # GET /health
+│   │   ├── creator.py               # Creator registration + management
+│   │   ├── fan.py                   # Fan inventory + stats
+│   │   ├── nft.py                   # NFT minting + transfer
+│   │   ├── merch.py                 # Store + orders + discounts
+│   │   ├── butki.py                 # Loyalty badges
+│   │   ├── bauni.py                 # Membership gating
+│   │   ├── shawty.py                # Collectible tokens
+│   │   ├── onramp.py                # Fiat on-ramp + simulation
+│   │   ├── transactions.py          # Signed txn submission
+│   │   ├── contracts.py             # Contract deploy + fund
+│   │   └── params.py                # Suggested txn params
+│   │
+│   ├── services/                    # Business logic (12 services)
+│   ├── middleware/                   # JWT auth + rate limiting
+│   ├── sticker_scripts/             # Low-level ASA operations
+│   ├── assets/stickers/             # Default sticker images
+│   ├── scripts/                     # Demo + test scripts
+│   └── data/                        # SQLite database
+│
+├── frontend1.md                     # Frontend build plan (reference)
+└── README.md                        # This file
 ```
 
 ---
@@ -191,425 +145,233 @@ algorand_creator_project/
 
 ### Prerequisites
 
-- Python 3.10+
-- [Pera Wallet](https://perawallet.app/) mobile app (set to **TestNet**)
-- Pinata account (free tier — for IPFS image/metadata storage)
+- **Python 3.13+** (backend)
+- **Node.js 18+** (frontend)
+- **Pera Wallet** mobile app (set to TestNet)
 
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/AdityaWagh19/algorand-fintech-boilerplate.git
-cd algorand-fintech-boilerplate
-cp backend/.env.example backend/.env
-# Edit backend/.env with your platform wallet mnemonic, Pinata keys, etc.
-```
-
-### 2. Backend setup
+### 1. Clone & Install Backend
 
 ```bash
-cd backend
+git clone https://github.com/your-repo/fanforge.git
+cd fanforge/backend
 python -m venv venv
-venv\Scripts\activate       # Windows
-# source venv/bin/activate  # macOS/Linux
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt
 ```
 
-### 3. Compile the TipProxy smart contract
+### 2. Configure Environment
 
-```bash
-python -m contracts.compile tip_proxy
-# → Creates backend/contracts/tip_proxy/compiled/ (approval.teal + clear.teal)
+Create `backend/.env` (a working `.env` is already included for hackathon demo):
+
+```env
+# Algorand TestNet
+ALGORAND_ALGOD_ADDRESS=https://testnet-api.algonode.cloud
+ALGORAND_ALGOD_TOKEN=
+ALGORAND_INDEXER_URL=https://testnet-idx.algonode.cloud
+
+# Platform wallet (deploys contracts, mints NFTs)
+PLATFORM_WALLET=your_platform_address_here
+PLATFORM_MNEMONIC=your twenty five word mnemonic here
+
+# Fan wallet (for testing)
+FAN_WALLET=your_fan_address_here
+FAN_MNEMONIC=your fan twenty five word mnemonic here
+
+# IPFS (Pinata)
+PINATA_API_KEY=your_pinata_api_key
+PINATA_SECRET=your_pinata_secret
+
+# Database
+DATABASE_URL=sqlite:///./data/sticker_platform.db
+
+# Auth (JWT)
+JWT_SECRET=your_random_secret_key_here
+
+# Mode
+ENVIRONMENT=development
+SIMULATION_MODE=True
+DEMO_MODE=True
+CORS_ORIGINS=http://localhost:3000,http://localhost:5500,http://localhost:8080,http://localhost:5173,http://127.0.0.1:5173
 ```
 
-### 4. Start the backend
+### 3. Start the Backend
 
 ```bash
+cd backend
+venv\Scripts\activate
 python main.py
-# → API at http://localhost:8000
-# → Swagger UI at http://localhost:8000/docs
-# → Database auto-created at data/sticker_platform.db
-# → Transaction listener starts automatically
 ```
 
-### 5. Run the demo (optional)
+Backend runs at **http://localhost:8000**. Swagger docs at **http://localhost:8000/docs**.
+
+### 4. Install & Start the Frontend
 
 ```bash
-cd backend
-
-# Generate demo accounts (creator + 2 fans)
-python scripts/generate_accounts.py
-
-# Run the full end-to-end demo
-python scripts/run_demo.py
+cd frontend
+npm install
+npm run dev
 ```
 
-### 6. Run tests
+Frontend runs at **http://localhost:5173**.
 
-```bash
-# Start the server first, then in a separate terminal:
-cd backend
+### 5. Open & Test
 
-# Security fix verification (23 tests)
-python scripts/test_security_fixes.py
+1. Open **http://localhost:5173** in your browser
+2. Click **"Connect Pera Wallet"** → scan QR with Pera Wallet app (TestNet mode)
+3. Sign the authentication challenge
+4. Register as a **Creator** → deploys your TipProxy smart contract
+5. Create **sticker templates** → upload images for Butki/Bauni/Shawty
+6. **Fund your wallet** (simulation mode) on the Landing page
+7. Navigate to **`/tip/{your-wallet}`** and send a tip → signs via Pera
+8. Check **Fan Hub** (`/fan`) to see your minted NFTs!
 
-# Endpoint smoke tests (28 tests)
-python scripts/test_all_endpoints.py
+---
+
+## Frontend Pages
+
+| # | Page | Route | Key Features |
+|---|------|-------|-------------|
+| 1 | **Landing** | `/` | Hero section, NFT showcase (Butki/Bauni/Shawty), Pera wallet connect, wallet funding (simulation), health badge |
+| 2 | **Creator Hub** | `/creator` | 4 tabs: Dashboard (stats + recent tips), Templates (CRUD + image upload), Products & Discounts, Contract (pause/unpause/upgrade + on-chain stats) |
+| 3 | **Fan Hub** | `/fan` | 4 tabs: My NFTs (inventory + pending claims), Loyalty & Membership (Butki + Bauni), Shawty Tokens (burn/lock/transfer), Stats |
+| 4 | **Store** | `/store/:creatorWallet` | Product catalog, Members-only tab, Cart + Quote + Checkout, Order history |
+| 5 | **Explore** | `/explore` | Global creator leaderboard, expandable creator detail with fan/Butki sub-leaderboards, links to Store/Tip |
+| 6 | **Tip** | `/tip/:creatorWallet` | Real algosdk transaction building (AppCall + Payment atomic group), Pera signing, loyalty/membership/golden odds preview |
+
+### Navigation Flow
+
+```
+Landing  ──→  Creator Hub  ──→  Store (own)
+   │              │                │
+   ├──→  Explore  ├──→  Leaderboard│
+   │       │      │                │
+   │       ├──→  Store (any) ←─────┘
+   │       │        │
+   ├──→  Fan Hub ←──┘
+   │       │
+   │       ├──→  Tip (any creator)
+   │       │
+   └──→  Explore
 ```
 
 ---
 
-## Frontend
+## API Overview
 
-The frontend consists of **9 static HTML screens** designed via [Google Stitch](https://stitch.withgoogle.com/) with corresponding JavaScript modules for backend integration.
+| Category | Endpoint | Description |
+|----------|----------|-------------|
+| **Health** | `GET /health` | Node status + round number |
+| **Auth** | `POST /auth/challenge` | Request nonce for wallet signing |
+| | `POST /auth/verify` | Verify Ed25519 signature → JWT token |
+| **Creator** | `POST /creator/register` | Register + deploy TipProxy |
+| | `GET /creator/{wallet}/dashboard` | Stats, contract, templates, transactions |
+| | `GET /creator/{wallet}/contract` | Contract info |
+| | `GET /creator/{wallet}/contract/stats` | On-chain contract state |
+| | `POST /creator/{wallet}/pause-contract` | Pause contract |
+| | `POST /creator/{wallet}/unpause-contract` | Unpause contract |
+| | `POST /creator/{wallet}/upgrade-contract` | Deploy new contract version |
+| | `GET /creator/{wallet}/templates` | List sticker templates |
+| | `POST /creator/{wallet}/sticker-template` | Create template (multipart) |
+| | `DELETE /creator/{wallet}/template/{id}` | Delete unminted template |
+| | `GET /creator/{wallet}/products` | List merch products |
+| | `POST /creator/{wallet}/products` | Create product |
+| | `PATCH /creator/{wallet}/products/{id}` | Update product |
+| | `DELETE /creator/{wallet}/products/{id}` | Delete product |
+| | `GET /creator/{wallet}/discounts` | List discount rules |
+| | `POST /creator/{wallet}/discounts` | Create discount rule |
+| **Fan** | `GET /fan/{wallet}/inventory` | Fan's NFT collection |
+| | `GET /fan/{wallet}/pending` | NFTs awaiting claim |
+| | `POST /fan/{wallet}/claim/{nftId}` | Claim pending NFT |
+| | `GET /fan/{wallet}/stats` | Tipping statistics |
+| | `GET /fan/{wallet}/golden-odds` | Golden sticker probability |
+| | `GET /fan/{wallet}/orders` | Fan's merch orders |
+| **Store** | `GET /creator/{wallet}/store` | Public store catalog |
+| | `GET /creator/{wallet}/store/members-only` | Bauni-gated catalog |
+| | `POST /creator/{wallet}/store/quote` | Build order quote |
+| | `POST /creator/{wallet}/store/order` | Place order |
+| **NFT** | `GET /nft/inventory/{wallet}` | NFT inventory |
+| | `GET /nft/{assetId}` | NFT details |
+| | `POST /nft/optin` | Create opt-in transaction |
+| | `POST /nft/transfer` | Transfer golden NFT |
+| | `POST /nft/mint/soulbound` | Mint soulbound NFT (listener) |
+| | `POST /nft/mint/golden` | Mint golden NFT (listener) |
+| **Butki** | `GET /butki/{wallet}/loyalty` | Fan loyalty (all creators) |
+| | `GET /butki/{wallet}/loyalty/{creator}` | Fan loyalty (specific creator) |
+| | `GET /butki/leaderboard/{creator}` | Creator's fan leaderboard |
+| **Bauni** | `GET /bauni/{wallet}/membership/{creator}` | Membership status |
+| | `GET /bauni/{wallet}/memberships` | All memberships |
+| | `POST /bauni/verify` | Verify membership |
+| **Shawty** | `GET /shawty/{wallet}/tokens` | Collectible tokens |
+| | `POST /shawty/burn` | Burn for merch |
+| | `POST /shawty/lock` | Lock for discount |
+| | `POST /shawty/transfer` | Transfer token |
+| | `GET /shawty/{wallet}/validate/{assetId}` | Validate ownership |
+| | `GET /shawty/{wallet}/redemptions` | Redemption history |
+| **Leaderboard** | `GET /leaderboard/global/top-creators` | Top creators by ALGO |
+| | `GET /leaderboard/{creator}` | Creator's top fans |
+| **On-Ramp** | `GET /onramp/config` | On-ramp configuration |
+| | `POST /onramp/create-order` | Create on-ramp order |
+| | `GET /onramp/order/{id}` | Order status |
+| | `GET /onramp/fan/{wallet}/orders` | Fan's on-ramp orders |
+| | `POST /simulate/fund-wallet` | Fund wallet (TestNet only) |
+| **Txn** | `GET /params` | Suggested transaction params |
+| | `POST /submit` | Submit signed transaction |
+| | `POST /submit-group` | Submit atomic group |
+| **Contract** | `GET /contract/info` | Contract TEAL info |
+| | `GET /contract/list` | Available contracts |
+| | `POST /contract/deploy` | Deploy contract |
+| | `POST /contract/fund` | Fund contract |
 
-### Architecture
-
-- **HTML screens** — Stitch-generated, styled with Tailwind CSS
-- **JavaScript modules** — ES Module files that inject dynamic behavior via DOM `id` attributes
-- **Shared infrastructure** — `shared.js` provides API client, Pera Wallet integration, state management, toast notifications, and utility functions
-- **Zero build step** — serve directly with any HTTP server (no bundler required)
-
-### Screen Overview
-
-| # | Screen | HTML File | JS Module | Key Features |
-|---|--------|-----------|-----------|-------------|
-| 1 | Landing Page | `01-landing-page.html` | `01-landing.js` | Hero section, metrics, CTA buttons, wallet connect |
-| 2 | Creator Setup | `02-creator-setup-wizard.html` | `02-setup-wizard.js` | 4-step wizard: Connect → Deploy → Stickers → Share |
-| 3 | Fan Tip Page | `03-fan-tip-page.html` | `03-fan-tip.js` | Sticker gallery, tip flow, atomic group signing, polling |
-| 4 | Creator Dashboard | `04-creator-dashboard.html` | `04-creator-dashboard.js` | Analytics, sticker CRUD, contract pause/resume, fans |
-| 5 | Fan Dashboard | `05-fan-dashboard.html` | `05-fan-dashboard.js` | Stats, recent tips, golden odds, balance |
-| 6 | Sticker Inventory | `06-sticker-inventory.html` | `06-inventory.js` | NFT grid, filter tabs, detail modal, transfer |
-| 7 | Add Balance | `07-add-balance.html` | `07-add-balance.js` | Simulation faucet, quick-pick, success card |
-| 8 | Leaderboard | `08-leaderboard.html` | `08-leaderboard.js` | Creator/fan tables, search, tab switching |
-| 9 | About & 404 | `09-about-and-404.html` | `09-about.js` | FAQ accordion, nav, Go Home/Back |
-
-### Running the Frontend
-
-```bash
-# Serve the frontend (from docs/stitch-screens/)
-python -m http.server 3000
-# → Open http://localhost:3000/01-landing-page.html
-```
-
-> **Note:** The backend must be running on `http://localhost:8000` for API calls to work. Without the backend, pages still render their static UI correctly — API-dependent features will show fallback states.
-
-### Frontend Documentation
-
-| Document | Description |
-|----------|-------------|
-| [`docs/FRONTEND_PLAN.md`](docs/FRONTEND_PLAN.md) | Complete frontend specification — all 10 pages, component design system, UX flows |
-| [`docs/BACKEND_INTEGRATION_PLAN.md`](docs/BACKEND_INTEGRATION_PLAN.md) | Screen-by-screen wiring plan — DOM mappings, API endpoints, data flows, testing checklists |
+Full interactive API docs: **http://localhost:8000/docs**
 
 ---
 
 ## Security
 
-The backend has been hardened with **12 security fixes** from a comprehensive audit ([full report](docs/BACKEND_SECURITY_AUDIT.md)).
-
-### Implemented Security Measures
-
-| Category | Fix | Description |
-|----------|-----|-------------|
-| **Authentication** | C1 | `X-Wallet-Address` header required on state-changing endpoints |
-| **Secrets** | C2 | Demo account mnemonics replaced with placeholders |
-| **Webhook** | C3 | Transak webhook signature verification fails closed |
-| **Validation** | H1 | All wallet address parameters validated (58-char, checksum) |
-| **Rate Limiting** | H2 | Sensitive endpoints rate-limited (creator registration, funding) |
-| **Environment Guard** | H3 | Simulation endpoint double-guarded (disabled in production) |
-| **Key Caching** | H4 | Platform private key cached instead of re-derived per request |
-| **Error Handling** | H5 | Error messages sanitized — no tracebacks leaked to clients |
-| **CORS** | M2 | Wildcard CORS rejected in production |
-| **Financial Math** | M6 | Decimal arithmetic for fiat-to-crypto calculations |
-| **Pagination** | L4 | NFT and fan inventory endpoints paginated |
-| **Documentation** | I1, I3 | Singleton Algorand client, env vars documented |
-
-### Authentication
-
-State-changing endpoints require the `X-Wallet-Address` header matching the wallet in the URL path:
-
-```bash
-# Pause a creator's contract (requires auth)
-curl -X POST http://localhost:8000/creator/{wallet}/pause-contract \
-  -H "X-Wallet-Address: {wallet}"
-```
-
-Read-only endpoints (GET) are publicly accessible.
-
----
-
-## TipProxy Smart Contract
-
-The core of the platform — a per-creator tip validation and forwarding contract written in PyTeal.
-
-### Methods
-
-| Method | Description | Caller |
-|--------|-------------|--------|
-| `tip(memo)` | Validate payment, forward ALGO to creator via inner txn, emit log | Fan |
-| `update_min_tip(amount)` | Update minimum tip threshold | Creator |
-| `pause()` | Pause tip acceptance | Creator |
-| `unpause()` | Resume tip acceptance | Creator |
-
-### On-Chain Log Format
-
-```
-[32 bytes: fan_address][8 bytes: amount (big-endian uint64)][N bytes: memo (UTF-8)]
-```
-
-The listener parses this log to extract tip details and trigger the minting pipeline.
-
-### Global State
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `creator` | Bytes (32) | Creator wallet address |
-| `min_tip` | Uint64 | Minimum tip in microAlgos |
-| `paused` | Uint64 | 0 = active, 1 = paused |
-| `total_tips` | Uint64 | Lifetime tip count |
-| `total_amount` | Uint64 | Lifetime microAlgos received |
-
----
-
-## Minting Pipeline (Listener)
-
-```
-Indexer poll → parse TipProxy log → deduplicate →
-  ├── MEMBERSHIP:* memo → membership sticker (soulbound + expiry)
-  └── Regular tip → threshold match → best template (soulbound or golden)
-       ├── 1 ALGO → Butki (soulbound)
-       ├── 2 ALGO → Bauni (soulbound)
-       └── 5 ALGO → Shawty (golden, tradable)
-```
-
-The listener uses **round-based tracking** (persisted via `ListenerState` table) to ensure no tips are skipped, even when minting takes several seconds.
-
-### Demo Mode vs Production
-
-| Feature | Demo Mode (`DEMO_MODE=True`) | Production |
-|---------|------------------------------|------------|
-| Fan opt-in | Automatic (uses stored keys) | Frontend prompts via Pera Wallet |
-| NFT transfer | Immediate clawback transfer | After fan signs opt-in |
-| Fan keys | Stored in `demo_accounts.json` | Never stored server-side |
-
----
-
-## API Reference (30+ endpoints)
-
-Full interactive documentation available at `http://localhost:8000/docs` (Swagger UI).
-
-### Core
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/health` | GET | — | Health check + Algorand node status |
-| `/params` | GET | — | Suggested transaction params (60s cache) |
-| `/submit` | POST | — | Submit a single signed transaction |
-| `/submit-group` | POST | — | Submit an atomic group of transactions |
-| `/listener/status` | GET | — | Transaction listener status + last round |
-
-### Contract
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/contract/info?name=` | GET | — | Contract compilation status |
-| `/contract/list` | GET | — | List all available contracts |
-
-### Creator
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/creator/register` | POST | Rate limited | Register wallet + deploy TipProxy |
-| `/creator/{wallet}/contract` | GET | — | Active app_id + app_address |
-| `/creator/{wallet}/contract/stats` | GET | — | On-chain global state |
-| `/creator/{wallet}/upgrade-contract` | POST | ✅ Wallet | Deploy new TipProxy version |
-| `/creator/{wallet}/pause-contract` | POST | ✅ Wallet | Pause active TipProxy |
-| `/creator/{wallet}/unpause-contract` | POST | ✅ Wallet | Unpause TipProxy |
-| `/creator/{wallet}/sticker-template` | POST | ✅ Wallet | Upload image to IPFS + save template |
-| `/creator/{wallet}/templates` | GET | — | List all sticker templates |
-| `/creator/{wallet}/template/{id}` | DELETE | ✅ Wallet | Delete template (0 mints only) |
-| `/creator/{wallet}/dashboard` | GET | — | Combined on-chain + DB analytics |
-
-### NFT
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/nft/mint/soulbound` | POST | — | Mint non-transferable sticker NFT |
-| `/nft/mint/golden` | POST | — | Mint tradable sticker NFT |
-| `/nft/transfer` | POST | — | Transfer golden NFT to new owner |
-| `/nft/optin` | POST | — | Create unsigned opt-in transaction |
-| `/nft/inventory/{wallet}` | GET | — | All NFTs owned (paginated: `?skip=0&limit=20`) |
-| `/nft/{asset_id}` | GET | — | Single NFT details with template info |
-
-### Fan & Leaderboards
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/fan/{wallet}/inventory` | GET | — | NFTs + template details (paginated) |
-| `/fan/{wallet}/stats` | GET | — | Tip count, ALGO spent, creator breakdown |
-| `/fan/{wallet}/pending` | GET | — | NFTs awaiting claim (opt-in) |
-| `/fan/{wallet}/golden-odds` | GET | — | Golden sticker probability calculator |
-| `/leaderboard/{creator_wallet}` | GET | — | Top fans ranked by ALGO tipped |
-| `/leaderboard/global/top-creators` | GET | — | Global top creators |
-
-### On-Ramp
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/onramp/config` | GET | — | Simulation/production mode + exchange rates |
-| `/simulate/fund-wallet` | POST | Rate limited | Fund wallet with TestNet ALGO (3/min) |
-| `/onramp/create-order` | POST | — | Create Transak on-ramp order |
-| `/onramp/order/{id}` | GET | — | Get order status |
-| `/onramp/fan/{wallet}/orders` | GET | — | Fan's order history |
-| `/onramp/webhook` | POST | Signature | Transak delivery webhook |
-
----
-
-## Architecture
-
-```
-┌───────────────────────────────────┐         ┌────────────────────────────────────┐
-│   Frontend (9 HTML Screens)       │         │      Backend (FastAPI)              │
-│                                   │         │                                    │
-│  Pera Wallet SDK ─────────────────┤─ sign ──┤  middleware/                       │
-│  shared.js API Client ────────────┤─ fetch ─┤    auth.py (wallet verification)  │
-│  ES Module JS (per screen) ───────┤         │    rate_limit.py (abuse prevention)│
-│                                   │         │                                    │
-│  Pages:                           │         │  routes/ (8 modules)               │
-│   01-landing, 02-setup-wizard     │         │    health, params, transactions    │
-│   03-fan-tip, 04-creator-dash     │         │    contracts, creator, nft, fan    │
-│   05-fan-dash, 06-inventory       │         │    onramp                          │
-│   07-add-balance, 08-leaderboard  │         │                                    │
-│   09-about-404                    │         │  services/ (8 services)            │
-└───────────────────────────────────┘         │    contract, ipfs, nft, transak    │
-                                              │    membership, listener, txn       │
-                                              │    probability                     │
-                                              │                                    │
-                                              │  contracts/tip_proxy/              │
-                                              │  db_models → SQLite + Alembic      │
-                                              └─────────────┬──────────────────────┘
-                                                            │
-                               ┌─────────────────────────────┼─────────────────────┐
-                               │                             │                     │
-                     ┌─────────▼──────┐           ┌──────────▼────────┐   ┌───────▼───────┐
-                     │ Algorand       │           │ Algorand Indexer   │   │ Pinata IPFS   │
-                     │ TestNet Node   │           │ (polls for tips)   │   │ (images +     │
-                     │ (via AlgoNode) │           │                    │   │  ARC-3 JSON)  │
-                     └────────────────┘           └────────────────────┘   └───────────────┘
-```
-
----
-
-## Database Schema
-
-| Table | Columns | Purpose |
-|-------|---------|---------|
-| `users` | wallet_address, role, username | Wallet addresses (creator / fan roles) |
-| `contracts` | app_id, app_address, version, active | Per-creator TipProxy deployments |
-| `sticker_templates` | name, ipfs_hash, sticker_type, tip_threshold | Creator sticker designs with IPFS hashes |
-| `nfts` | asset_id, owner_wallet, sticker_type, delivery_status | Minted NFT instances (ASA IDs) |
-| `transactions` | tx_id, fan_wallet, creator_wallet, amount_micro | Tip events from TipProxy on-chain logs |
-| `transak_orders` | order_id, fiat_amount, crypto_amount, status | Fiat on-ramp order tracking |
-| `listener_state` | last_processed_round | Persisted listener round for crash recovery |
-
----
-
-## Environment Variables
-
-See [`backend/.env.example`](backend/.env.example) for the complete template.
-
-| Variable | Description |
-|----------|-------------|
-| `PLATFORM_WALLET` | Platform wallet address (deploys contracts, mints NFTs) |
-| `PLATFORM_MNEMONIC` | 25-word mnemonic for the platform wallet |
-| `PINATA_API_KEY` | Pinata IPFS API key |
-| `PINATA_SECRET` | Pinata IPFS secret key |
-| `PINATA_GATEWAY` | Pinata gateway URL (default: `https://gateway.pinata.cloud/ipfs`) |
-| `DATABASE_URL` | Database connection (default: `sqlite:///./data/sticker_platform.db`) |
-| `SIMULATION_MODE` | `True` for TestNet wallet funding, `False` for production |
-| `DEMO_MODE` | `True` for auto opt-in/transfer, `False` for production |
-| `TRANSAK_API_KEY` | Transak API key (production on-ramp) |
-| `TRANSAK_SECRET` | Webhook signature verification secret |
-| `CORS_ORIGINS` | Allowed CORS origins (must be explicit in production) |
-| `ENVIRONMENT` | `development` or `production` |
-| `GOLDEN_THRESHOLD` | Base probability for rare stickers (default: `0.10`) |
-| `GOLDEN_TRIGGER_INTERVAL` | Guaranteed rare every N tips (default: `10`) |
-| `LISTENER_POLL_SECONDS` | Indexer polling interval (default: `10`) |
-| `CONTRACT_FUND_AMOUNT` | MicroAlgos to fund new contracts (default: `100000`) |
-| `PLATFORM_FEE_PERCENT` | Fee percentage on Transak on-ramp orders (default: `2.0`) |
+- **Non-custodial**: Users sign all transactions with Pera Wallet. No private keys in the frontend.
+- **Platform key**: Only `PLATFORM_MNEMONIC` is stored server-side (for minting NFTs).
+- **Auth**: JWT-based wallet authentication with Ed25519 signature challenge/verify flow.
+- **Rate limiting**: Creator registration (5/hour), wallet funding (3/min), auth endpoints (20-30/min).
+- **Production guards**: Validates CORS origins, disables simulation/demo mode, requires JWT_SECRET at startup.
+- **Input validation**: All wallet addresses validated via `algosdk.encoding`.
 
 ---
 
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------:|
-| Backend | Python 3.10+, FastAPI, SQLAlchemy (async), Pydantic, Alembic |
-| Smart Contracts | PyTeal → TEAL v4, deployed on Algorand TestNet |
-| Blockchain SDK | py-algorand-sdk (`algosdk`), algokit-utils |
-| NFT Standard | Algorand ASA with ARC-3 metadata |
-| IPFS | Pinata (image + JSON metadata hosting) |
-| Database | SQLite (async via `aiosqlite`) — swap to PostgreSQL for production |
-| Wallet | Pera Wallet Connect SDK (frontend), mnemonic (backend platform key) |
-| Frontend | Vanilla HTML + Tailwind CSS + ES Module JavaScript |
-| Image Processing | Pillow (sticker image validation) |
-| HTTP Client | httpx (async, for Transak/IPFS calls) |
+|-------|-----------|
+| **Blockchain** | Algorand TestNet (AVM 8) |
+| **Smart Contracts** | PyTeal → TEAL |
+| **Backend** | FastAPI + Python 3.13 |
+| **Frontend** | React 19 + Vite 7 |
+| **Wallet** | Pera Wallet Connect |
+| **Styling** | Vanilla CSS (dark mode, glassmorphism) |
+| **Database** | SQLite + SQLAlchemy (async) |
+| **IPFS** | Pinata |
+| **NFT Standard** | ARC-3 (metadata) |
+| **Node Polyfills** | vite-plugin-node-polyfills (Buffer, crypto) |
 
 ---
 
-## Development History
+## Demo Flow
 
-### Phase 1–3: Core Platform
-- Designed and implemented the **TipProxy V4 smart contract** in PyTeal with 4 methods (tip, update_min_tip, pause, unpause)
-- Built the **FastAPI backend** with 30+ REST endpoints across 8 route modules
-- Implemented **IPFS integration** with Pinata for image + ARC-3 metadata upload
-- Created the **NFT minting pipeline** supporting soulbound (frozen) and golden (tradable) stickers
-
-### Phase 4: Transaction Listener & Automation
-- Built the **transaction listener** that polls the Algorand Indexer for on-chain tip events
-- Implemented **membership tiers**, **leaderboards**, and **fan statistics**
-- Added **Transak on-ramp integration** with webhook processing and order tracking
-
-### Phase 5: End-to-End Testing & Hardening
-- Deployed TipProxy contract to Algorand TestNet
-- Created demo accounts (creator + 2 fans) and tested the full tip-to-NFT flow
-- **Fixed atomic NFT transfers** — implemented demo mode with auto opt-in + clawback transfer
-- **Fixed golden sticker minting** — added `strict_empty_address_check=False` for truly tradable NFTs
-- **Changed golden sticker logic** from probability-based to **threshold-based** — 5 ALGO tip always earns the golden sticker
-- **Fixed listener round tracking** — switched from indexer health round to max-round-of-processed-transactions
-
-### Phase 6: Security Audit & Hardening
-- Conducted comprehensive **23-finding security audit** across all backend code
-- Implemented **12 security fixes** covering authentication, input validation, rate limiting, error sanitization, CORS validation, and financial math accuracy
-- Created **wallet authentication middleware** (`X-Wallet-Address` header verification)
-- Added **Algorand address validation** utility (58-char, checksum verification)
-- Created **automated test suites** — 23 security tests + 28 endpoint tests
-- **Removed demo secrets** from source files (replaced with placeholders)
-
-### Phase 7: Frontend Design & Integration
-- Generated **9 production-quality screens** via Google Stitch from a comprehensive frontend specification
-- Created **10 JavaScript modules** (1 shared + 9 per-screen) for backend integration
-- Implemented **Pera Wallet Connect** flow across all screens
-- Wired all screens to backend API endpoints with proper error handling, loading states, and fallbacks
-- Built complete **FAQ accordion**, **leaderboard search**, **sticker filtering**, and **simulation faucet** features
-
----
-
-## Production Roadmap
-
-See [`docs/PRODUCTION_ROADMAP.md`](docs/PRODUCTION_ROADMAP.md) for the full list of known gaps. Key items:
-
-| Priority | Item | Effort |
-|----------|------|--------|
-| **P0** | Ed25519 wallet signature auth (replace header check) | ~2 days |
-| **P0** | PostgreSQL (replace SQLite) | ~30 min |
-| **P1** | HSM / KMS key management | ~1 week |
-| **P1** | Task queue for minting pipeline (Celery/ARQ) | ~3 days |
-| **P2** | Redis-backed rate limiting | ~2 hours |
-| **P2** | Listener liveness monitoring | ~2 hours |
-| **P3** | Automated test suite (pytest + CI/CD) | Ongoing |
+```
+1. Connect Pera Wallet → Auth challenge → JWT token
+2. Register as Creator → TipProxy contract deployed on TestNet
+3. Create sticker templates (Butki, Bauni, Shawty) with images
+4. Add merch products + discount rules
+5. Fund test wallet (simulation mode)
+6. Send tips via /tip/:creatorWallet → atomic AppCall + Payment
+7. Listener detects tips → mints NFT stickers → delivers to fan
+8. Fan views collection in Fan Hub → claims pending NFTs
+9. Fan burns Shawty tokens for merch discounts
+10. Global leaderboard updates in real-time
+```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE)

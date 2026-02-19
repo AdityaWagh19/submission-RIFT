@@ -2,7 +2,9 @@
 Transaction service — handles base64 processing, submission, and error classification.
 """
 import base64
+import hashlib
 import logging
+from datetime import datetime, timedelta
 
 from algorand_client import algorand_client
 
@@ -20,6 +22,66 @@ logger = logging.getLogger(__name__)
 # 4. Add atomic group validation — verify group ID matches across all txns before submission
 # 5. Add transaction simulation (algod.dryrun) before submission to catch errors early
 # END TODO
+
+
+_IDEMPOTENCY_TTL = timedelta(minutes=5)
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def _idempotency_get_db(db, *, key: str) -> str | None:
+    from sqlalchemy import select, delete
+    from db_models import SubmittedTransaction
+
+    now = datetime.utcnow()
+    res = await db.execute(
+        select(SubmittedTransaction).where(SubmittedTransaction.idempotency_key == key)
+    )
+    row = res.scalar_one_or_none()
+    if not row:
+        return None
+    if row.expires_at <= now:
+        await db.execute(delete(SubmittedTransaction).where(SubmittedTransaction.id == row.id))
+        return None
+    return row.tx_id
+
+
+async def _idempotency_set_db(
+    db,
+    *,
+    key: str,
+    tx_id: str,
+    request_hash: str | None,
+    kind: str,
+) -> None:
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+    from db_models import SubmittedTransaction
+
+    now = datetime.utcnow()
+    row = SubmittedTransaction(
+        idempotency_key=key,
+        tx_id=tx_id,
+        request_hash=request_hash,
+        kind=kind,
+        status="submitted",
+        created_at=now,
+        expires_at=now + _IDEMPOTENCY_TTL,
+    )
+    db.add(row)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Race: another request stored it first. Keep the first tx_id.
+        existing = await db.execute(
+            select(SubmittedTransaction).where(SubmittedTransaction.idempotency_key == key)
+        )
+        existing_row = existing.scalar_one_or_none()
+        if existing_row:
+            return
+        raise
 
 
 def fix_base64_padding(b64_str: str) -> str:
@@ -40,7 +102,7 @@ def validate_base64(b64_str: str) -> bytes:
         raise ValueError(f"Invalid base64 encoding: {e}")
 
 
-def submit_single(signed_txn_b64: str) -> str:
+async def submit_single(db, signed_txn_b64: str, *, idempotency_key: str | None = None) -> str:
     """
     Submit a single signed transaction to Algorand TestNet.
 
@@ -50,19 +112,33 @@ def submit_single(signed_txn_b64: str) -> str:
     Returns:
         Transaction ID from the network
     """
+    if idempotency_key:
+        cached = await _idempotency_get_db(db, key=idempotency_key)
+        if cached:
+            return cached
+
     b64_str = fix_base64_padding(signed_txn_b64)
 
     # Validate
     decoded = validate_base64(b64_str)
+    request_hash = _sha256_hex(decoded)
     logger.info(f"Submitting single txn: {len(decoded)} bytes")
 
     # send_raw_transaction expects base64 string (it decodes internally)
     tx_id = algorand_client.client.send_raw_transaction(b64_str)
     logger.info(f"Transaction submitted: {tx_id}")
+    if idempotency_key:
+        await _idempotency_set_db(
+            db,
+            key=idempotency_key,
+            tx_id=tx_id,
+            request_hash=request_hash,
+            kind="single",
+        )
     return tx_id
 
 
-def submit_group(signed_txns_b64: list[str]) -> str:
+async def submit_group(db, signed_txns_b64: list[str], *, idempotency_key: str | None = None) -> str:
     """
     Submit an atomic group of signed transactions.
 
@@ -72,6 +148,11 @@ def submit_group(signed_txns_b64: list[str]) -> str:
     Returns:
         First transaction ID from the group
     """
+    if idempotency_key:
+        cached = await _idempotency_get_db(db, key=idempotency_key)
+        if cached:
+            return cached
+
     logger.info(f"Submitting transaction group ({len(signed_txns_b64)} txns)")
 
     # Decode and concatenate all signed transaction bytes
@@ -83,9 +164,18 @@ def submit_group(signed_txns_b64: list[str]) -> str:
 
     combined = b''.join(all_bytes)
     combined_b64 = base64.b64encode(combined).decode()
+    request_hash = _sha256_hex(combined)
 
     tx_id = algorand_client.client.send_raw_transaction(combined_b64)
     logger.info(f"Group submitted: {tx_id}")
+    if idempotency_key:
+        await _idempotency_set_db(
+            db,
+            key=idempotency_key,
+            tx_id=tx_id,
+            request_hash=request_hash,
+            kind="group",
+        )
     return tx_id
 
 

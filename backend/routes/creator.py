@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from db_models import User, Contract, Transaction, NFT, StickerTemplate
-from middleware.auth import require_wallet_auth
+from deps import require_creator
+from middleware.auth import require_wallet_auth, require_authenticated_wallet
 from middleware.rate_limit import rate_limit
 from models import (
     CreatorRegisterRequest,
@@ -48,6 +49,7 @@ async def register_creator(
     request: CreatorRegisterRequest,
     req: Request = None,
     db: AsyncSession = Depends(get_db),
+    auth_wallet: str = Depends(require_authenticated_wallet),
     _rate=Depends(rate_limit(max_requests=5, window_seconds=3600)),
 ):
     """
@@ -63,6 +65,8 @@ async def register_creator(
     wallet = request.wallet_address
     # Security fix H1: Validate wallet address
     validate_algorand_address(wallet)
+    if auth_wallet != wallet:
+        raise HTTPException(status_code=403, detail="Authenticated wallet does not match request wallet.")
     username = request.username
 
     logger.info(f"Creator registration: {wallet[:8]}...")
@@ -152,7 +156,7 @@ async def register_creator(
 
 @router.get("/{wallet}/contract", response_model=ContractInfoResponse)
 async def get_creator_contract(
-    wallet: str,
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """Get the active TipProxy contract for a creator."""
@@ -185,7 +189,7 @@ async def get_creator_contract(
 
 @router.get("/{wallet}/contract/stats", response_model=ContractStatsResponse)
 async def get_creator_contract_stats(
-    wallet: str,
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """Read on-chain global state from a creator's TipProxy contract."""
@@ -218,7 +222,7 @@ async def get_creator_contract_stats(
 
 @router.post("/{wallet}/upgrade-contract", response_model=UpgradeContractResponse)
 async def upgrade_creator_contract(
-    wallet: str = Depends(require_wallet_auth),
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -301,7 +305,7 @@ async def upgrade_creator_contract(
 
 @router.post("/{wallet}/pause-contract")
 async def pause_creator_contract(
-    wallet: str = Depends(require_wallet_auth),
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -322,36 +326,18 @@ async def pause_creator_contract(
             detail=f"No active contract found for {wallet[:8]}...",
         )
 
-    from algosdk import transaction as algo_txn, encoding as algo_enc
-    from algorand_client import algorand_client
-
-    sp = algorand_client.get_suggested_params()
-    sp.fee = max(sp.fee, 1000)
-    sp.flat_fee = True
-
-    txn = algo_txn.ApplicationCallTxn(
+    return contract_service.create_tipproxy_action_txn(
         sender=wallet,
-        sp=sp,
-        index=contract.app_id,
-        on_complete=algo_txn.OnComplete.NoOpOC,
-        app_args=[b"pause"],
+        app_id=contract.app_id,
+        action="pause",
     )
-
-    txn_bytes = algo_enc.msgpack_encode(txn)
-
-    return {
-        "unsignedTxn": txn_bytes,
-        "appId": contract.app_id,
-        "action": "pause",
-        "message": "Sign this transaction with Pera Wallet to pause your TipProxy",
-    }
 
 
 # ── POST /creator/{wallet}/unpause-contract ────────────────────────
 
 @router.post("/{wallet}/unpause-contract")
 async def unpause_creator_contract(
-    wallet: str,
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -372,36 +358,18 @@ async def unpause_creator_contract(
             detail=f"No active contract found for {wallet[:8]}...",
         )
 
-    from algosdk import transaction as algo_txn, encoding as algo_enc
-    from algorand_client import algorand_client
-
-    sp = algorand_client.get_suggested_params()
-    sp.fee = max(sp.fee, 1000)
-    sp.flat_fee = True
-
-    txn = algo_txn.ApplicationCallTxn(
+    return contract_service.create_tipproxy_action_txn(
         sender=wallet,
-        sp=sp,
-        index=contract.app_id,
-        on_complete=algo_txn.OnComplete.NoOpOC,
-        app_args=[b"unpause"],
+        app_id=contract.app_id,
+        action="unpause",
     )
-
-    txn_bytes = algo_enc.msgpack_encode(txn)
-
-    return {
-        "unsignedTxn": txn_bytes,
-        "appId": contract.app_id,
-        "action": "unpause",
-        "message": "Sign this transaction with Pera Wallet to unpause your TipProxy",
-    }
 
 
 # ── GET /creator/{wallet}/dashboard ────────────────────────────────
 
 @router.get("/{wallet}/dashboard")
 async def get_creator_dashboard(
-    wallet: str,
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -416,11 +384,8 @@ async def get_creator_dashboard(
     )
     user = user_result.scalar_one_or_none()
 
-    if not user or user.role != "creator":
-        raise HTTPException(
-            status_code=404,
-            detail=f"Creator {wallet[:8]}... not found. Register first.",
-        )
+    if not user:
+        raise HTTPException(status_code=404, detail="Creator not found.")
 
     # Get active contract
     contract_result = await db.execute(
@@ -450,7 +415,8 @@ async def get_creator_dashboard(
         except Exception as e:
             logger.warning(f"Failed to read on-chain stats: {e}")
 
-    # Count unique fans
+    # Phase 6: Optimize - use separate optimized queries (still better than before)
+    # Count unique fans (uses index on creator_wallet)
     fans_result = await db.execute(
         select(func.count(distinct(Transaction.fan_wallet))).where(
             Transaction.creator_wallet == wallet
@@ -458,12 +424,11 @@ async def get_creator_dashboard(
     )
     total_fans = fans_result.scalar() or 0
 
-    # Count minted stickers for this creator
+    # Count minted stickers for this creator (uses composite index on template_id)
     nfts_count_result = await db.execute(
-        select(func.count(NFT.id)).join(
-            StickerTemplate,
-            NFT.template_id == StickerTemplate.id,
-        ).where(StickerTemplate.creator_wallet == wallet)
+        select(func.count(NFT.id))
+        .join(StickerTemplate, NFT.template_id == StickerTemplate.id)
+        .where(StickerTemplate.creator_wallet == wallet)
     )
     total_stickers = nfts_count_result.scalar() or 0
 
@@ -505,7 +470,7 @@ async def get_creator_dashboard(
 
 @router.post("/{wallet}/sticker-template", response_model=StickerTemplateResponse)
 async def create_sticker_template(
-    wallet: str = Depends(require_wallet_auth),
+    wallet: str = Depends(require_creator),
     name: str = Form(..., description="Sticker display name"),
     sticker_type: str = Form("soulbound", description="'soulbound' or 'golden'"),
     category: str = Form("tip", description="Sticker category"),
@@ -523,20 +488,6 @@ async def create_sticker_template(
 
     Accepts multipart/form-data with an image file.
     """
-    # Validate creator
-    user_result = await db.execute(
-        select(User).where(
-            User.wallet_address == wallet,
-            User.role == "creator",
-        )
-    )
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Creator {wallet[:8]}... not found. Register first.",
-        )
-
     # Validate sticker type
     if sticker_type not in ("soulbound", "golden"):
         raise HTTPException(
@@ -669,7 +620,7 @@ async def create_sticker_template(
 
 @router.get("/{wallet}/templates", response_model=StickerTemplateListResponse)
 async def get_creator_templates(
-    wallet: str,
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -721,8 +672,8 @@ async def get_creator_templates(
 
 @router.delete("/{wallet}/template/{template_id}")
 async def delete_sticker_template(
-    wallet: str,
     template_id: int,
+    wallet: str = Depends(require_creator),
     db: AsyncSession = Depends(get_db),
 ):
     """

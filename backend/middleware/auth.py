@@ -1,85 +1,150 @@
 """
-Wallet-based authentication middleware for the Creator Sticker Platform.
+Wallet authentication helpers.
 
-Security fix C1: Lightweight wallet-ownership verification.
+Legacy prototype approach:
+  - State-changing endpoints require an X-Wallet-Address header
+  - Header must match the wallet in the URL path/body
 
-Prototype approach:
-    - State-changing endpoints require an X-Wallet-Address header
-    - The header value must match the wallet in the URL path
-    - This prevents casual abuse where someone calls endpoints with
-      another user's wallet address
+Production-ready approach (implemented here):
+  - Issue short-lived JWT access tokens after verifying an Ed25519 signature
+    over a server-provided nonce (see routes/auth.py).
 
-Production approach (future):
-    - Replace with Ed25519 signature verification
-    - Frontend signs a challenge/nonce with Pera Wallet
-    - Backend verifies the signature against the wallet's public key
-
-Usage in routes:
-    @router.post("/{wallet}/upgrade-contract")
-    async def upgrade(wallet: str = Depends(require_wallet_auth)):
-        ...
+Backward compatibility:
+  - For now, endpoints may accept either:
+      - Authorization: Bearer <jwt>
+      - X-Wallet-Address: <wallet> (legacy; not cryptographically secure)
 """
 import logging
+from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException, Header, Path
 from typing import Optional
 
+import jwt
+
+from config import settings
+
 logger = logging.getLogger(__name__)
 
-# TODO FOR JULES:
-# 1. Replace X-Wallet-Address header check with Ed25519 signature verification:
-#    a. Add GET /auth/challenge endpoint that returns a random nonce (store server-side with 5-min TTL)
-#    b. Frontend signs nonce with Pera Wallet private key → sends signature + wallet address
-#    c. Backend verifies Ed25519 signature against wallet's public key using algosdk.encoding
-#    d. On success, issue a short-lived JWT token (15-min expiry) for subsequent requests
-# 2. Add session management — store JWT in httpOnly cookie or Authorization header
-# 3. Add rate limiting on /auth/challenge (prevent nonce flooding)
-# 4. Support both TestNet and MainNet address validation
-# 5. Add wallet rotation support — allow user to migrate to new wallet
-# END TODO
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+def decode_access_token(token: str) -> dict:
+    if not settings.jwt_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="Server auth misconfigured (JWT secret missing).",
+        )
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=["HS256"],
+            issuer=settings.jwt_issuer,
+            options={"require": ["exp", "iat", "iss", "sub"]},
+        )
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Access token expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid access token.")
+
+
+def issue_access_token(*, wallet_address: str, role: str) -> str:
+    now = _now_utc()
+    exp = now.replace(microsecond=0) + timedelta(minutes=settings.jwt_access_ttl_minutes)
+    payload = {
+        "iss": settings.jwt_issuer,
+        "sub": wallet_address,
+        "role": role,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+    }
+    if not settings.jwt_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="Server auth misconfigured (JWT secret missing).",
+        )
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+async def get_authenticated_wallet(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_wallet_address: Optional[str] = Header(None, alias="X-Wallet-Address"),
+) -> Optional[str]:
+    """
+    Best-effort authentication:
+      - Prefer Authorization Bearer JWT
+      - Fall back to legacy X-Wallet-Address header (NOT secure)
+    """
+    token = _parse_bearer_token(authorization)
+    if token:
+        payload = decode_access_token(token)
+        return payload.get("sub")
+    return x_wallet_address
+
+
+async def require_authenticated_wallet(
+    x_wallet_address: Optional[str] = Header(None, alias="X-Wallet-Address"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+) -> str:
+    auth_wallet = await get_authenticated_wallet(
+        authorization=authorization,
+        x_wallet_address=x_wallet_address,
+    )
+    if not auth_wallet:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Provide Authorization: Bearer <token> (preferred) or X-Wallet-Address (legacy).",
+        )
+    return auth_wallet
 
 
 async def require_wallet_auth(
     wallet: str = Path(..., description="Algorand wallet address"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
     x_wallet_address: Optional[str] = Header(
         None,
-        description="Caller's wallet address — must match the {wallet} path parameter",
+        alias="X-Wallet-Address",
+        description="Legacy caller wallet header (deprecated).",
     ),
 ) -> str:
     """
-    Verify that the caller has declared ownership of the wallet.
+    Dependency for routes that act on a `{wallet}` path parameter.
 
-    For the prototype, this is a simple header check:
-    the X-Wallet-Address header must match the {wallet} path param.
-
-    This prevents:
-    - Accidentally calling endpoints with the wrong wallet
-    - Simple attacks where someone guesses another wallet's address
-    - Tools/scripts that don't set the auth header
-
-    It does NOT prevent:
-    - A determined attacker who sets the header manually
-    - For full security, use Ed25519 signature verification (future)
-
-    Returns:
-        The validated wallet address
+    - If JWT is provided, it must match the path wallet.
+    - Otherwise falls back to legacy X-Wallet-Address header match.
     """
+    token = _parse_bearer_token(authorization)
+    if token:
+        payload = decode_access_token(token)
+        auth_wallet = payload.get("sub")
+        if auth_wallet != wallet:
+            raise HTTPException(status_code=403, detail="Wallet mismatch for access token.")
+        return wallet
+
+    # Legacy fallback (kept for backward compatibility)
     if not x_wallet_address:
         raise HTTPException(
             status_code=401,
-            detail="Authentication required. Set the X-Wallet-Address header "
-                   "to your connected wallet address.",
+            detail="Authentication required. Provide Authorization: Bearer <token> (preferred) or X-Wallet-Address (legacy).",
         )
-
     if x_wallet_address != wallet:
         logger.warning(
-            f"Auth mismatch: path wallet={wallet[:8]}... "
-            f"vs header wallet={x_wallet_address[:8]}..."
+            f"Auth mismatch: path wallet={wallet[:8]}... vs header wallet={x_wallet_address[:8]}..."
         )
         raise HTTPException(
             status_code=403,
-            detail="Wallet mismatch: X-Wallet-Address header does not match "
-                   "the wallet in the URL. You can only perform actions on "
-                   "your own wallet.",
+            detail="Wallet mismatch: X-Wallet-Address header does not match the wallet in the URL.",
         )
-
     return wallet

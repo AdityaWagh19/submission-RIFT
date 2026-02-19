@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     platform_wallet: str = ""
     platform_mnemonic: str = ""
 
+    # ── Fan Wallet (testing/demo only) ───────────────────────────
+    fan_wallet: str = ""
+    fan_mnemonic: str = ""
+
     # ── Pinata IPFS ─────────────────────────────────────────────────
     pinata_api_key: str = ""
     pinata_secret: str = ""
@@ -52,6 +56,12 @@ class Settings(BaseSettings):
     environment: str = "development"
     simulation_mode: bool = True  # Hackathon demo: simulate fiat on-ramp, real blockchain
 
+    # ── Auth (JWT) ──────────────────────────────────────────────────
+    jwt_secret: str = ""
+    jwt_issuer: str = "fanforge-api"
+    jwt_access_ttl_minutes: int = 15
+    auth_challenge_ttl_minutes: int = 5
+
     # ── Demo Mode ───────────────────────────────────────────────────
     # When True, fan mnemonics from demo_accounts.json are used
     # to auto opt-in + transfer NFTs in the listener pipeline.
@@ -66,12 +76,13 @@ class Settings(BaseSettings):
     platform_fee_percent: float = 2.0         # % deducted from tips
 
     # ── CORS ────────────────────────────────────────────────────────
-    cors_origins: str = "http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5500,http://127.0.0.1:5500"
+    cors_origins: str = "http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5500,http://127.0.0.1:5500,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=False
+        case_sensitive=False,
+        extra="ignore",  # allow unknown .env keys without crashing
     )
 
     @property
@@ -117,6 +128,12 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "DEMO_MODE must be false in production. "
                     "Demo mode uses stored private keys for auto opt-in."
+                )
+            # Auth: require JWT secret in production
+            if not self.jwt_secret:
+                raise ValueError(
+                    "JWT_SECRET must be set in production. "
+                    "It is used to sign access tokens for wallet authentication."
                 )
             logger.info("✅ Production settings validated")
         else:

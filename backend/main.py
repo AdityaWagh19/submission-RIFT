@@ -9,6 +9,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +58,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Phase 7: Shutdown thread pool executor for blocking Algorand calls
+    try:
+        from services.async_executor import shutdown_executor
+        shutdown_executor()
+    except Exception:
+        pass
+
     logger.info("Shutting down")
 
 
@@ -90,6 +98,13 @@ app.include_router(contracts.router)
 _v4_routes = []
 
 try:
+    from routes import auth
+    app.include_router(auth.router)
+    _v4_routes.append("auth")
+except ImportError as e:
+    logger.debug(f"Auth routes not available: {e}")
+
+try:
     from routes import creator
     app.include_router(creator.router)
     _v4_routes.append("creator")
@@ -121,6 +136,35 @@ try:
         _v4_routes.append("simulate")
 except ImportError as e:
     logger.debug(f"On-ramp routes not available: {e}")
+
+# V5 NFT Utility routes — Butki, Bauni, Shawty
+try:
+    from routes import butki
+    app.include_router(butki.router)
+    _v4_routes.append("butki")
+except ImportError as e:
+    logger.debug(f"Butki routes not available: {e}")
+
+try:
+    from routes import bauni
+    app.include_router(bauni.router)
+    _v4_routes.append("bauni")
+except ImportError as e:
+    logger.debug(f"Bauni routes not available: {e}")
+
+try:
+    from routes import shawty
+    app.include_router(shawty.router)
+    _v4_routes.append("shawty")
+except ImportError as e:
+    logger.debug(f"Shawty routes not available: {e}")
+
+try:
+    from routes import merch
+    app.include_router(merch.router)
+    _v4_routes.append("merch")
+except ImportError as e:
+    logger.debug(f"Merch routes not available: {e}")
 
 if _v4_routes:
     logger.info(f"V4 routes registered: {', '.join(_v4_routes)}")
@@ -157,7 +201,52 @@ async def global_exception_handler(request, exc):
     logger.error(f"Unhandled exception on {request.url.path}: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"error": "Internal server error"},
+        content={
+            "success": False,
+            "error": {
+                "code": "internal_server_error",
+                "message": "Internal server error",
+            },
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc: HTTPException):
+    """
+    Standardize HTTPException responses for frontend consumers.
+
+    Keeps the original HTTP status code, but wraps the payload.
+    """
+    # Check if this is a DomainError (which is a subclass of HTTPException)
+    if hasattr(exc, "message") and hasattr(exc, "details"):
+        # DomainError with structured error info
+        error_code = exc.__class__.__name__.replace("Error", "").lower()
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "success": False,
+                "error": {
+                    "code": error_code,
+                    "message": exc.message,
+                    "details": exc.details,
+                },
+            },
+        )
+
+    # Regular HTTPException
+    detail = exc.detail
+    message = detail if isinstance(detail, str) else "Request failed"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "error": {
+                "code": "http_error",
+                "message": message,
+                "details": detail if not isinstance(detail, str) else None,
+            },
+        },
     )
 
 

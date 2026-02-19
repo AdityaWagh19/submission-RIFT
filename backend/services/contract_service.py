@@ -3,11 +3,14 @@ Contract service — handles TEAL loading, compilation, deployment, and funding.
 
 V4 additions: deploy_tip_proxy, upgrade_tip_proxy, get_contract_stats,
 close_out_contract, decode_global_state.
+
+Phase 7: TTL cache for get_contract_stats to avoid re-querying algod in tight loops.
 """
 import base64
 import json
 import logging
 import os
+import time
 from datetime import datetime
 
 from algosdk import transaction, encoding, logic, account
@@ -16,6 +19,10 @@ from algorand_client import algorand_client
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+# Phase 7: Contract stats cache (app_id -> (stats_dict, expires_at))
+_stats_cache: dict[int, tuple[dict, float]] = {}
+_stats_cache_ttl_seconds = 60
 
 # TODO FOR JULES:
 # 1. Add idempotent deployment pattern (prevent orphaned on-chain contracts):
@@ -32,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 # Path to contracts directory
 CONTRACTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "contracts")
+
+# In-memory cache for compiled TEAL binaries, keyed by contract name.
+_compiled_program_cache: dict[str, tuple[bytes, bytes]] = {}
 
 
 def _get_contract_dir(contract_name: str) -> str:
@@ -107,15 +117,20 @@ def create_deploy_txn(sender: str, contract_name: str) -> dict:
     """
     logger.info(f"Creating deploy txn for '{contract_name}' from {sender}")
 
-    # Load and compile TEAL
-    approval_teal = load_teal(contract_name, "approval.teal")
-    clear_teal = load_teal(contract_name, "clear.teal")
+    # Load and compile TEAL (with in-memory cache)
+    cache_key = contract_name
+    if cache_key in _compiled_program_cache:
+        approval_program, clear_program = _compiled_program_cache[cache_key]
+    else:
+        approval_teal = load_teal(contract_name, "approval.teal")
+        clear_teal = load_teal(contract_name, "clear.teal")
 
-    approval_compiled = algorand_client.client.compile(approval_teal)
-    clear_compiled = algorand_client.client.compile(clear_teal)
+        approval_compiled = algorand_client.client.compile(approval_teal)
+        clear_compiled = algorand_client.client.compile(clear_teal)
 
-    approval_program = base64.b64decode(approval_compiled["result"])
-    clear_program = base64.b64decode(clear_compiled["result"])
+        approval_program = base64.b64decode(approval_compiled["result"])
+        clear_program = base64.b64decode(clear_compiled["result"])
+        _compiled_program_cache[cache_key] = (approval_program, clear_program)
 
     # Load contract info for schemas
     info = get_contract_info(contract_name)
@@ -194,6 +209,36 @@ def create_fund_txn(sender: str, app_id: int, amount: int = 100_000) -> dict:
     }
 
 
+def create_tipproxy_action_txn(*, sender: str, app_id: int, action: str) -> dict:
+    """
+    Create an unsigned ApplicationCallTxn for a TipProxy admin action.
+
+    Used by creator routes for pause/unpause without importing algosdk in routers.
+    """
+    if action not in ("pause", "unpause"):
+        raise ValueError("Unsupported TipProxy action")
+
+    sp = algorand_client.get_suggested_params()
+    sp.fee = max(sp.fee, 1000)
+    sp.flat_fee = True
+
+    txn = transaction.ApplicationCallTxn(
+        sender=sender,
+        sp=sp,
+        index=app_id,
+        on_complete=transaction.OnComplete.NoOpOC,
+        app_args=[action.encode("utf-8")],
+    )
+
+    txn_bytes = encoding.msgpack_encode(txn)
+    return {
+        "unsignedTxn": txn_bytes,
+        "appId": app_id,
+        "action": action,
+        "message": f"Sign this transaction with Pera Wallet to {action} your TipProxy",
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 # V4 — TipProxy Contract Management
 # ════════════════════════════════════════════════════════════════════
@@ -243,15 +288,20 @@ def deploy_tip_proxy(creator_wallet: str, min_tip_algo: float = 1.0) -> dict:
 
     logger.info(f"Deploying TipProxy for creator {creator_wallet[:8]}... (min_tip: {min_tip_algo} ALGO)")
 
-    # Load and compile TEAL
-    approval_teal = load_teal("tip_proxy", "approval.teal")
-    clear_teal = load_teal("tip_proxy", "clear.teal")
+    # Load and compile TEAL (with in-memory cache)
+    cache_key = "tip_proxy"
+    if cache_key in _compiled_program_cache:
+        approval_program, clear_program = _compiled_program_cache[cache_key]
+    else:
+        approval_teal = load_teal("tip_proxy", "approval.teal")
+        clear_teal = load_teal("tip_proxy", "clear.teal")
 
-    approval_compiled = client.compile(approval_teal)
-    clear_compiled = client.compile(clear_teal)
+        approval_compiled = client.compile(approval_teal)
+        clear_compiled = client.compile(clear_teal)
 
-    approval_program = base64.b64decode(approval_compiled["result"])
-    clear_program = base64.b64decode(clear_compiled["result"])
+        approval_program = base64.b64decode(approval_compiled["result"])
+        clear_program = base64.b64decode(clear_compiled["result"])
+        _compiled_program_cache[cache_key] = (approval_program, clear_program)
 
     # Global schema: 5 uints + 2 bytes (from contract spec)
     global_schema = transaction.StateSchema(num_uints=5, num_byte_slices=2)
@@ -419,9 +469,19 @@ def get_contract_stats(app_id: int) -> dict:
     """
     Read on-chain global state from a TipProxy contract.
 
+    Phase 7: Results cached for 60 seconds to avoid repeated algod calls in dashboards.
+
     Returns:
         dict: {total_tips, total_amount_algo, min_tip_algo, paused, contract_version}
     """
+    global _stats_cache
+    now = time.monotonic()
+    if app_id in _stats_cache:
+        cached_stats, expires_at = _stats_cache[app_id]
+        if now < expires_at:
+            return cached_stats
+        del _stats_cache[app_id]
+
     client = algorand_client.client
 
     try:
@@ -429,7 +489,7 @@ def get_contract_stats(app_id: int) -> dict:
         raw_state = app_info.get("params", {}).get("global-state", [])
         global_state = decode_global_state(raw_state)
 
-        return {
+        stats = {
             "app_id": app_id,
             "total_tips": global_state.get("total_tips", 0),
             "total_amount_algo": global_state.get("total_amount", 0) / 1_000_000,
@@ -437,6 +497,8 @@ def get_contract_stats(app_id: int) -> dict:
             "paused": bool(global_state.get("paused", 0)),
             "contract_version": global_state.get("contract_version", 1),
         }
+        _stats_cache[app_id] = (stats, now + _stats_cache_ttl_seconds)
+        return stats
     except Exception as e:
         logger.error(f"Failed to read contract stats for app {app_id}: {e}")
         raise

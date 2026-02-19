@@ -33,10 +33,11 @@ from algosdk import encoding as algo_encoding, mnemonic as algo_mnemonic
 
 from config import settings
 from database import async_session
+from services.listener_metrics import get_listener_metrics
 
 logger = logging.getLogger(__name__)
 
-# TODO FOR JULES:
+# Phase 7: Remaining TODOs (optional enhancements):
 # 1. Migrate minting from synchronous (blocks event loop ~4.5s/mint) to task queue:
 #    - Option A: Celery + Redis broker (mature, well-documented)
 #    - Option B: ARQ (async-native, lighter weight, better for this project)
@@ -104,6 +105,9 @@ _errors_count: int = 0
 # In-memory cache of last round (DB is source of truth)
 _last_processed_round: int = 0
 
+# Periodic membership expiry cleanup (Phase 3)
+_last_membership_expiry_cleanup: Optional[datetime] = None
+
 
 # ════════════════════════════════════════════════════════════════════
 # Persistent State — Fix #5
@@ -156,6 +160,8 @@ async def _query_indexer(
     Follows next-token pagination to ensure no transactions are missed when
     more results exist than fit in a single page.
 
+    Phase 7: Exponential backoff retry on transient failures.
+
     Args:
         app_id: TipProxy application ID
         min_round: Minimum round to search from
@@ -172,36 +178,57 @@ async def _query_indexer(
 
     all_transactions = []
     next_token = None
+    max_retries = 4
+    base_delay = 2.0
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            while True:
-                params = {**base_params}
-                if next_token:
-                    params["next"] = next_token
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                while True:
+                    params = {**base_params}
+                    if next_token:
+                        params["next"] = next_token
 
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    data = response.json()
 
-                txns = data.get("transactions", [])
-                all_transactions.extend(txns)
+                    txns = data.get("transactions", [])
+                    all_transactions.extend(txns)
 
-                # Check for more pages
-                next_token = data.get("next-token")
-                if not next_token or not txns:
-                    break
+                    # Check for more pages
+                    next_token = data.get("next-token")
+                    if not next_token or not txns:
+                        break
 
-                # Safety: cap at 1000 txns per cycle to prevent runaway loops
-                if len(all_transactions) >= 1000:
-                    logger.warning(
-                        f"Indexer pagination cap reached for app {app_id} "
-                        f"({len(all_transactions)} txns). Remaining will be caught next cycle."
-                    )
-                    break
+                    # Safety: cap at 1000 txns per cycle to prevent runaway loops
+                    if len(all_transactions) >= 1000:
+                        logger.warning(
+                            f"Indexer pagination cap reached for app {app_id} "
+                            f"({len(all_transactions)} txns). Remaining will be caught next cycle."
+                        )
+                        break
 
-    except Exception as e:
-        logger.warning(f"Indexer query failed for app {app_id}: {e}")
+            return all_transactions
+
+        except Exception as e:
+            get_listener_metrics().record_indexer_error()
+            is_transient = isinstance(
+                e,
+                (httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout, ConnectionError),
+            )
+            if attempt < max_retries - 1 and is_transient:
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    f"Indexer query failed for app {app_id} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                all_transactions = []
+                next_token = None
+            else:
+                logger.warning(f"Indexer query failed for app {app_id}: {e}")
+                return all_transactions
 
     return all_transactions
 
@@ -262,134 +289,313 @@ def parse_tip_log(txn: dict) -> Optional[dict]:
 
 async def route_tip(tx_record, db):
     """
-    Route a verified tip through the minting pipeline.
+    Route a verified tip through the structured NFT utility pipeline.
 
-    Decision tree:
-    1. If memo starts with MEMBERSHIP:*, try membership sticker
-    2. Otherwise, find matching tip template (by amount threshold)
-    3. Run golden probability check -> maybe mint golden too
+    Three NFT types with distinct behavior:
+
+    BUTKI (Loyalty Badge):
+        - >= 0.5 ALGO tip qualifies for loyalty increment
+        - Every 5th tip earns 1 Butki badge NFT (soulbound)
+        - Badge count is per creator (not global)
+
+    BAUNI (Membership NFT):
+        - Triggered by MEMBERSHIP:BAUNI memo with >= 5 ALGO
+        - Non-transferable (soulbound), 30-day validity
+        - Renewal extends expiry by +30 days
+        - Expired NFTs automatically revoke access
+
+    SHAWTY (Transactional Utility NFT):
+        - Triggered by PURCHASE:SHAWTY memo with >= 2 ALGO
+        - Transferable (golden), no expiration
+        - Can be burned for merch or locked for discount
 
     Args:
         tx_record: Transaction DB record
         db: AsyncSession
     """
     from db_models import StickerTemplate, NFT
-    from services import membership_service, probability_service, nft_service
+    from services import nft_service
+    from services import butki_service, bauni_service, shawty_service, merch_service
     from sqlalchemy import select
 
     memo = tx_record.memo or ""
     creator_wallet = tx_record.creator_wallet
     fan_wallet = tx_record.fan_wallet
     amount_micro = tx_record.amount_micro
-    amount_algo = amount_micro / 1_000_000  # Convert for threshold comparison
+    amount_algo = amount_micro / 1_000_000
+    memo_upper = memo.strip().upper()
 
-    # ── Path 1: Membership sticker ─────────────────────────────
-    if membership_service.is_membership_memo(memo):
-        tier = membership_service.get_tier(memo)
-        if tier and amount_algo >= tier["min_algo"]:
-            # Find matching membership template
-            result = await db.execute(
-                select(StickerTemplate).where(
-                    StickerTemplate.creator_wallet == creator_wallet,
-                    StickerTemplate.category == tier["category"],
-                )
+    # ── Path 0: MERCH ORDER settlement (does not short-circuit other rewards) ──
+    from domain.constants import MEMO_ORDER_PREFIX, MEMO_BAUNI_PREFIX, MEMO_SHAWTY_PREFIX
+
+    if memo_upper.startswith(MEMO_ORDER_PREFIX):
+        try:
+            order_id_str = memo_upper.split(MEMO_ORDER_PREFIX)[1].split()[0]
+            order_id = int(order_id_str)
+        except Exception:
+            order_id = None
+
+        if order_id is not None:
+            settled = await merch_service.settle_order_payment(
+                db=db,
+                order_id=order_id,
+                fan_wallet=fan_wallet,
+                creator_wallet=creator_wallet,
+                amount_algo=amount_algo,
+                tx_id=tx_record.tx_id,
             )
-            template = result.scalar_one_or_none()
+            if settled:
+                logger.info(
+                    f"  [MERCH] Order {order_id} settled from tip {tx_record.tx_id} "
+                    f"({amount_algo:.2f} ALGO)"
+                )
 
-            if template and template.metadata_url:
-                try:
-                    asset_id = nft_service.mint_soulbound_sticker(
-                        name=template.name[:32],
-                        metadata_url=template.metadata_url,
-                    )
-                    nft = NFT(
-                        asset_id=asset_id,
-                        template_id=template.id,
-                        owner_wallet=fan_wallet,
-                        sticker_type="soulbound",
-                        expires_at=membership_service.calculate_expiry(tier),
-                    )
-                    db.add(nft)
+    # ── Path 1: BAUNI Membership Purchase ──────────────────────
+    # Triggered by memo "MEMBERSHIP:BAUNI" with >= 5 ALGO
+    if memo_upper.startswith(MEMO_BAUNI_PREFIX):
+        # Idempotency: if this tip tx already created a membership, do nothing
+        try:
+            from db_models import Membership
+            existing_membership = await db.execute(
+                select(Membership).where(Membership.purchase_tx_id == tx_record.tx_id)
+            )
+            if existing_membership.scalar_one_or_none():
+                logger.info(f"  Bauni: already processed tx {tx_record.tx_id}, skipping")
+                return
+        except Exception:
+            # Best-effort; if the check fails, proceed and rely on DB constraints downstream
+            pass
 
-                    # Transfer to fan (auto opt-in only in demo mode)
-                    try:
-                        fan_pk = _get_demo_fan_key(fan_wallet)
-                        result = nft_service.send_nft_to_fan(asset_id, fan_wallet, fan_private_key=fan_pk)
-                        nft.tx_id = result["tx_id"]
-                        nft.delivery_status = result["status"]
-                    except Exception as e:
-                        nft.delivery_status = "failed"
-                        logger.warning(f"Membership NFT transfer failed: {e}")
+        if amount_algo < bauni_service.BAUNI_COST_ALGO:
+            logger.warning(
+                f"  Bauni: insufficient amount {amount_algo:.2f} ALGO "
+                f"(need {bauni_service.BAUNI_COST_ALGO}) from {fan_wallet[:8]}..."
+            )
+            return
 
-                    logger.info(
-                        f"  Membership sticker minted: {membership_service.get_tier_name(memo)} "
-                        f"for {fan_wallet[:8]}... (Asset: {asset_id})"
-                    )
-                except Exception as e:
-                    logger.error(f"Membership mint failed: {e}")
-        return  # membership tips don't also trigger normal stickers
+        # Find Bauni template
+        result = await db.execute(
+            select(StickerTemplate).where(
+                StickerTemplate.creator_wallet == creator_wallet,
+                StickerTemplate.category == "bauni_membership",
+            )
+        )
+        template = result.scalar_one_or_none()
 
-    # ── Path 2: Regular tip sticker (threshold-based) ─────────────
-    # Find the best matching tip template: highest threshold the tip meets.
-    # Tip thresholds are stored in ALGO (Float), so we compare with amount_algo.
-    result = await db.execute(
-        select(StickerTemplate).where(
-            StickerTemplate.creator_wallet == creator_wallet,
-            StickerTemplate.category == "tip",
-            StickerTemplate.tip_threshold <= amount_algo,
-        ).order_by(StickerTemplate.tip_threshold.desc())
-    )
-    tip_template = result.scalars().first()
-
-    if tip_template and tip_template.metadata_url:
-        is_golden = tip_template.sticker_type == "golden"
+        if not template or not template.metadata_url:
+            logger.warning(f"  Bauni: no template found for creator {creator_wallet[:8]}...")
+            return
 
         try:
-            if is_golden:
-                asset_id = nft_service.mint_golden_sticker(
-                    name=tip_template.name[:32],
-                    metadata_url=tip_template.metadata_url,
-                )
-            else:
-                asset_id = nft_service.mint_soulbound_sticker(
-                    name=tip_template.name[:32],
-                    metadata_url=tip_template.metadata_url,
-                )
+            asset_id = await nft_service.mint_soulbound_sticker_async(
+                name=template.name[:32],
+                metadata_url=template.metadata_url,
+                unit_name="BAUNI",
+            )
 
             nft = NFT(
                 asset_id=asset_id,
-                template_id=tip_template.id,
+                template_id=template.id,
                 owner_wallet=fan_wallet,
-                sticker_type=tip_template.sticker_type,
+                sticker_type="soulbound",
+                nft_class="bauni",
             )
             db.add(nft)
 
+            # Transfer to fan (Phase 7: async to avoid blocking event loop)
             try:
                 fan_pk = _get_demo_fan_key(fan_wallet)
-                result = nft_service.send_nft_to_fan(asset_id, fan_wallet, fan_private_key=fan_pk)
-                nft.tx_id = result["tx_id"]
-                nft.delivery_status = result["status"]
+                xfer = await nft_service.send_nft_to_fan_async(asset_id, fan_wallet, fan_private_key=fan_pk)
+                nft.tx_id = xfer["tx_id"]
+                nft.delivery_status = xfer["status"]
             except Exception as e:
                 nft.delivery_status = "failed"
-                logger.warning(f"Tip NFT transfer failed: {e}")
+                logger.warning(f"Bauni transfer failed: {e}")
 
-            emoji = "* " if is_golden else "# "
+            # Record membership (handles renewal logic)
+            membership_result = await bauni_service.purchase_membership(
+                db=db,
+                fan_wallet=fan_wallet,
+                creator_wallet=creator_wallet,
+                asset_id=asset_id,
+                purchase_tx_id=tx_record.tx_id,
+                amount_paid_micro=amount_micro,
+            )
+
+            nft.expires_at = membership_result["expires_at"]
+            renewal_str = "RENEWAL" if membership_result["is_renewal"] else "NEW"
             logger.info(
-                f"  {emoji} Tip sticker minted: '{tip_template.name}' "
-                f"({tip_template.sticker_type}) for {fan_wallet[:8]}... "
-                f"({amount_algo:.2f} ALGO -> threshold {tip_template.tip_threshold})"
+                f"  [BAUNI {renewal_str}] Membership minted for {fan_wallet[:8]}... "
+                f"(ASA: {asset_id}, expires: {membership_result['expires_at'].isoformat()})"
             )
         except Exception as e:
-            logger.error(f"Tip sticker mint failed: {e}")
+            logger.error(f"Bauni mint failed: {e}")
+            raise
+        return
 
-    # ── Path 3: Rare sticker probability check (RESERVED) ───────
-    # This path is reserved for a future "rare collection" feature.
-    # When enabled, rare stickers will be minted based on probability
-    # (separate from the threshold-based tip stickers above).
-    # The probability_service is still available for this purpose.
-    #
-    # To enable: create templates with category="rare" and use
-    # probability_service.should_mint_golden() to decide.
+    # ── Path 2: SHAWTY Store Purchase ──────────────────────────
+    # Triggered by memo "PURCHASE:SHAWTY" with >= 2 ALGO
+    if memo_upper.startswith(MEMO_SHAWTY_PREFIX):
+        # Idempotency: if this tip tx already registered a token, do nothing
+        try:
+            from db_models import ShawtyToken
+            existing_token = await db.execute(
+                select(ShawtyToken).where(ShawtyToken.purchase_tx_id == tx_record.tx_id)
+            )
+            if existing_token.scalar_one_or_none():
+                logger.info(f"  Shawty: already processed tx {tx_record.tx_id}, skipping")
+                return
+        except Exception:
+            pass
+
+        if amount_algo < shawty_service.SHAWTY_COST_ALGO:
+            logger.warning(
+                f"  Shawty: insufficient amount {amount_algo:.2f} ALGO "
+                f"(need {shawty_service.SHAWTY_COST_ALGO}) from {fan_wallet[:8]}..."
+            )
+            return
+
+        # Find Shawty template
+        result = await db.execute(
+            select(StickerTemplate).where(
+                StickerTemplate.creator_wallet == creator_wallet,
+                StickerTemplate.category == "shawty_collectible",
+            )
+        )
+        template = result.scalar_one_or_none()
+
+        if not template or not template.metadata_url:
+            logger.warning(f"  Shawty: no template found for creator {creator_wallet[:8]}...")
+            return
+
+        try:
+            asset_id = await nft_service.mint_golden_sticker_async(
+                name=template.name[:32],
+                metadata_url=template.metadata_url,
+                unit_name="SHAWTY",
+            )
+
+            nft = NFT(
+                asset_id=asset_id,
+                template_id=template.id,
+                owner_wallet=fan_wallet,
+                sticker_type="golden",
+                nft_class="shawty",
+            )
+            db.add(nft)
+
+            # Transfer to fan (Phase 7: async)
+            try:
+                fan_pk = _get_demo_fan_key(fan_wallet)
+                xfer = await nft_service.send_nft_to_fan_async(asset_id, fan_wallet, fan_private_key=fan_pk)
+                nft.tx_id = xfer["tx_id"]
+                nft.delivery_status = xfer["status"]
+            except Exception as e:
+                nft.delivery_status = "failed"
+                logger.warning(f"Shawty transfer failed: {e}")
+
+            # Register in Shawty tracking table
+            await shawty_service.register_purchase(
+                db=db,
+                asset_id=asset_id,
+                owner_wallet=fan_wallet,
+                creator_wallet=creator_wallet,
+                purchase_tx_id=tx_record.tx_id,
+                amount_paid_micro=amount_micro,
+            )
+
+            logger.info(
+                f"  [SHAWTY] Golden collectible minted for {fan_wallet[:8]}... "
+                f"(ASA: {asset_id}, cost: {amount_algo:.2f} ALGO)"
+            )
+        except Exception as e:
+            logger.error(f"Shawty mint failed: {e}")
+            raise
+        return
+
+    # ── Path 3: BUTKI Loyalty Tip (default for regular tips) ───
+    # Any tip >= 0.5 ALGO increments the fan's loyalty counter.
+    # Every 5th tip earns a Butki loyalty badge NFT.
+    if amount_algo < butki_service.BUTKI_MIN_TIP_ALGO:
+        logger.debug(
+            f"  Tip {amount_algo:.2f} ALGO below Butki threshold "
+            f"({butki_service.BUTKI_MIN_TIP_ALGO} ALGO) from {fan_wallet[:8]}..."
+        )
+        return
+
+    # Record tip and check if badge earned
+    loyalty_result = await butki_service.record_tip(
+        db=db,
+        fan_wallet=fan_wallet,
+        creator_wallet=creator_wallet,
+        tx_id=tx_record.tx_id,
+        amount_micro=amount_micro,
+    )
+
+    tip_count = loyalty_result["tip_count"]
+    earned_badge = loyalty_result["earned_badge"]
+
+    logger.info(
+        f"  [BUTKI] tip #{tip_count} from {fan_wallet[:8]}... "
+        f"({amount_algo:.2f} ALGO)"
+    )
+
+    # Mint a Butki badge only on every 5th tip
+    if earned_badge:
+        result = await db.execute(
+            select(StickerTemplate).where(
+                StickerTemplate.creator_wallet == creator_wallet,
+                StickerTemplate.category == "butki_badge",
+            )
+        )
+        butki_template = result.scalar_one_or_none()
+
+        if butki_template and butki_template.metadata_url:
+            try:
+                badge_number = loyalty_result["badges_total"]
+                asset_id = await nft_service.mint_soulbound_sticker_async(
+                    name=f"Butki Badge #{badge_number}"[:32],
+                    metadata_url=butki_template.metadata_url,
+                    unit_name="BUTKI",
+                )
+                nft = NFT(
+                    asset_id=asset_id,
+                    template_id=butki_template.id,
+                    owner_wallet=fan_wallet,
+                    sticker_type="soulbound",
+                    nft_class="butki",
+                )
+                db.add(nft)
+
+                try:
+                    fan_pk = _get_demo_fan_key(fan_wallet)
+                    xfer = await nft_service.send_nft_to_fan_async(asset_id, fan_wallet, fan_private_key=fan_pk)
+                    nft.tx_id = xfer["tx_id"]
+                    nft.delivery_status = xfer["status"]
+                except Exception as e:
+                    nft.delivery_status = "failed"
+                    logger.warning(f"Butki badge transfer failed: {e}")
+
+                # Store asset ID in loyalty record
+                await butki_service.record_badge_asset(
+                    db=db,
+                    fan_wallet=fan_wallet,
+                    creator_wallet=creator_wallet,
+                    asset_id=asset_id,
+                )
+
+                logger.info(
+                    f"  🏆 [BUTKI BADGE #{badge_number}] "
+                    f"Minted for {fan_wallet[:8]}... (ASA: {asset_id}, tip #{tip_count})"
+                )
+            except Exception as e:
+                logger.error(f"Butki badge mint failed: {e}")
+                raise
+        else:
+            logger.warning(
+                f"  No Butki badge template for creator {creator_wallet[:8]}... — "
+                f"badge earned at tip #{tip_count} but not minted"
+            )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -397,7 +603,21 @@ async def route_tip(tx_record, db):
 # ════════════════════════════════════════════════════════════════════
 
 MAX_RETRY_ATTEMPTS = 3
-RETRY_INTERVAL_SECONDS = 60  # Check for failed mints every 60 seconds
+# Phase 7: Exponential backoff base (60, 120, 240 seconds)
+RETRY_BASE_SECONDS = 60
+RETRY_MAX_SECONDS = 300
+
+
+def _retry_delay_for_attempt(attempt: int) -> float:
+    """Exponential backoff: 60s, 120s, 240s (capped at RETRY_MAX_SECONDS)."""
+    return min(RETRY_BASE_SECONDS * (2**attempt), RETRY_MAX_SECONDS)
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """Classify as transient (retry) vs permanent (give up)."""
+    err_str = str(e).lower()
+    transient_keywords = ("timeout", "connection", "network", "unavailable", "503", "502")
+    return any(kw in err_str for kw in transient_keywords)
 
 
 async def _retry_failed_mints():
@@ -412,11 +632,14 @@ async def _retry_failed_mints():
     from db_models import Transaction
     from sqlalchemy import select
 
-    logger.info(f"Retry task started (checking every {RETRY_INTERVAL_SECONDS}s, max {MAX_RETRY_ATTEMPTS} attempts)")
+    logger.info(f"Retry task started (exponential backoff, max {MAX_RETRY_ATTEMPTS} attempts)")
 
+    cycle = 0
     while _is_running:
         try:
-            await asyncio.sleep(RETRY_INTERVAL_SECONDS)
+            delay = _retry_delay_for_attempt(min(cycle // 3, 2))  # 0,1,2 -> 60s; 3,4,5 -> 120s; 6+ -> 240s
+            await asyncio.sleep(delay)
+            cycle += 1
 
             async with async_session() as db:
                 # Find unprocessed transactions (failed mints)
@@ -438,6 +661,7 @@ async def _retry_failed_mints():
 
                     if retry_count >= MAX_RETRY_ATTEMPTS:
                         tx_record.processed = True  # Give up — prevent infinite loop
+                        get_listener_metrics().record_retry_fail()
                         logger.error(
                             f"  ABANDONED: tx {tx_record.tx_id} failed after "
                             f"{MAX_RETRY_ATTEMPTS} retries. Fan {tx_record.fan_wallet[:8]}... "
@@ -449,16 +673,24 @@ async def _retry_failed_mints():
                     try:
                         await route_tip(tx_record, db)
                         tx_record.processed = True
+                        get_listener_metrics().record_retry_success()
                         logger.info(
                             f"  Retry SUCCESS: tx {tx_record.tx_id} "
                             f"(attempt {retry_count + 1})"
                         )
                     except Exception as e:
-                        _increment_retry_count(tx_record)
-                        logger.warning(
-                            f"  Retry FAILED: tx {tx_record.tx_id} "
-                            f"(attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS}): {e}"
-                        )
+                        get_listener_metrics().record_retry_fail()
+                        if not _is_transient_error(e) and retry_count >= 1:
+                            tx_record.processed = True
+                            logger.error(
+                                f"  Permanent error on tx {tx_record.tx_id}, abandoning: {e}"
+                            )
+                        else:
+                            _increment_retry_count(tx_record)
+                            logger.warning(
+                                f"  Retry FAILED: tx {tx_record.tx_id} "
+                                f"(attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS}): {e}"
+                            )
 
                 await db.commit()
 
@@ -528,6 +760,22 @@ async def _listener_loop():
             await asyncio.sleep(poll_interval)
 
             async with async_session() as db:
+                # Phase 3: periodic membership expiry cleanup (best-effort)
+                try:
+                    global _last_membership_expiry_cleanup
+                    now = datetime.utcnow()
+                    if (
+                        _last_membership_expiry_cleanup is None
+                        or (now - _last_membership_expiry_cleanup).total_seconds() >= 300
+                    ):
+                        from services import bauni_service
+                        expired_count = await bauni_service.expire_memberships(db)
+                        if expired_count:
+                            logger.info(f"  Bauni expiry cleanup: expired {expired_count} membership(s)")
+                        _last_membership_expiry_cleanup = now
+                except Exception as e:
+                    logger.debug(f"Membership expiry cleanup skipped: {e}")
+
                 # Get all active TipProxy contracts
                 result = await db.execute(
                     select(Contract).where(Contract.active == True)
@@ -559,9 +807,7 @@ async def _listener_loop():
 
                         # Deduplication: skip if already recorded
                         existing = await db.execute(
-                            select(Transaction).where(
-                                Transaction.tx_id == tx_id
-                            )
+                            select(Transaction).where(Transaction.tx_id == tx_id)
                         )
                         if existing.scalar_one_or_none():
                             continue
@@ -571,7 +817,7 @@ async def _listener_loop():
                         if not log_data:
                             continue  # not a tip() call (e.g., pause/unpause)
 
-                        # Record transaction (Fix #11: store microAlgos as integer)
+                        # Record transaction row first, so failures still leave processed=False for retry task
                         tx_record = Transaction(
                             tx_id=tx_id,
                             fan_wallet=log_data["fan_wallet"],
@@ -582,17 +828,23 @@ async def _listener_loop():
                             processed=False,
                         )
                         db.add(tx_record)
-                        await db.flush()  # get ID before routing
-
-                        # Route through minting pipeline
                         try:
-                            await route_tip(tx_record, db)
-                            tx_record.processed = True
+                            await db.flush()
+                        except Exception:
+                            # Most commonly a unique constraint race; skip and continue.
+                            continue
+
+                        # Process downstream actions inside a SAVEPOINT.
+                        # If minting fails, we keep the Transaction row and leave processed=False.
+                        try:
+                            async with db.begin_nested():
+                                await route_tip(tx_record, db)
+                                tx_record.processed = True
+                            get_listener_metrics().record_tip_processed()
                         except Exception as e:
-                            logger.error(
-                                f"Minting pipeline error for tx {tx_id}: {e}"
-                            )
-                            # Leave processed=False for retry task (Fix #4)
+                            get_listener_metrics().record_mint_failed()
+                            logger.error(f"Minting pipeline error for tx {tx_id}: {e}")
+                            # Leave processed=False for retry task.
 
                         new_tip_count += 1
 
@@ -603,6 +855,19 @@ async def _listener_loop():
                 if max_round_seen > _last_processed_round:
                     _last_processed_round = max_round_seen
                     await _save_last_round(max_round_seen)
+
+                # Phase 7: Metrics + listener lag (fetch current round from algod)
+                m = get_listener_metrics()
+                m.set_last_round(_last_processed_round)
+                m.heartbeat()
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        r = await client.get(f"{settings.algorand_algod_address}/v2/status")
+                        if r.status_code == 200:
+                            data = r.json()
+                            m.current_round = data.get("last-round")
+                except Exception:
+                    pass
 
                 if new_tip_count > 0:
                     logger.info(
@@ -665,7 +930,7 @@ async def stop():
 
 def get_status() -> dict:
     """Get listener status for the /listener/status endpoint."""
-    return {
+    base = {
         "running": _is_running,
         "lastProcessedRound": _last_processed_round,
         "errorsCount": _errors_count,
@@ -673,3 +938,8 @@ def get_status() -> dict:
         "retryEnabled": True,
         "maxRetryAttempts": MAX_RETRY_ATTEMPTS,
     }
+    try:
+        base["metrics"] = get_listener_metrics().to_dict()
+    except Exception:
+        base["metrics"] = {}
+    return base

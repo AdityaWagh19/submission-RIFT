@@ -12,11 +12,12 @@ Security fixes:
 import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from sqlalchemy import select, func, distinct, desc
+from sqlalchemy import select, func, distinct, case, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from db_models import User, NFT, StickerTemplate, Transaction, Contract
+from domain.responses import success_response, paginated_response
 from utils.validators import validate_algorand_address
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,16 @@ async def get_fan_inventory(
     )
     nfts = result.scalars().all()
 
+    # Batch-load templates to avoid N+1 queries
+    template_ids = {nft.template_id for nft in nfts}
+    templates_by_id = {}
+    if template_ids:
+        templates_result = await db.execute(
+            select(StickerTemplate).where(StickerTemplate.id.in_(template_ids))
+        )
+        templates = templates_result.scalars().all()
+        templates_by_id = {t.id: t for t in templates}
+
     # Get total count for pagination
     count_result = await db.execute(
         select(func.count(NFT.id)).where(NFT.owner_wallet == wallet)
@@ -60,42 +71,39 @@ async def get_fan_inventory(
 
     inventory = []
     for nft in nfts:
-        # Get template info
-        template_result = await db.execute(
-            select(StickerTemplate).where(
-                StickerTemplate.id == nft.template_id
-            )
+        template = templates_by_id.get(nft.template_id)
+
+        inventory.append(
+            {
+                "id": nft.id,
+                "assetId": nft.asset_id,
+                "templateId": nft.template_id,
+                "ownerWallet": nft.owner_wallet,
+                "stickerType": nft.sticker_type,
+                "deliveryStatus": nft.delivery_status,
+                "txId": nft.tx_id,
+                "expiresAt": nft.expires_at.isoformat() if nft.expires_at else None,
+                "mintedAt": nft.minted_at.isoformat() if nft.minted_at else None,
+                "templateName": template.name if template else None,
+                "imageUrl": template.image_url if template else None,
+                "metadataUrl": template.metadata_url if template else None,
+                "category": template.category if template else None,
+                "creatorWallet": template.creator_wallet if template else None,
+            }
         )
-        template = template_result.scalar_one_or_none()
 
-        inventory.append({
-            "id": nft.id,
-            "assetId": nft.asset_id,
-            "templateId": nft.template_id,
-            "ownerWallet": nft.owner_wallet,
-            "stickerType": nft.sticker_type,
-            "deliveryStatus": nft.delivery_status,
-            "txId": nft.tx_id,
-            "expiresAt": nft.expires_at.isoformat() if nft.expires_at else None,
-            "mintedAt": nft.minted_at.isoformat() if nft.minted_at else None,
-            "templateName": template.name if template else None,
-            "imageUrl": template.image_url if template else None,
-            "metadataUrl": template.metadata_url if template else None,
-            "category": template.category if template else None,
-            "creatorWallet": template.creator_wallet if template else None,
-        })
-
-    return {
-        "wallet": wallet,
-        "nfts": inventory,
-        "total": len(inventory),
-        "totalCount": total_count,
-        "skip": skip,
-        "limit": limit,
-        "hasMore": (skip + limit) < total_count,
-        "totalSoulbound": sum(1 for n in inventory if n["stickerType"] == "soulbound"),
-        "totalGolden": sum(1 for n in inventory if n["stickerType"] == "golden"),
-    }
+    # Use paginated_response but include additional stats in meta
+    response = paginated_response(
+        items=inventory,
+        limit=limit,
+        skip=skip,
+        total=total_count,
+    )
+    # Add wallet and type counts to meta
+    response["meta"]["wallet"] = wallet
+    response["meta"]["totalSoulbound"] = sum(1 for n in inventory if n["stickerType"] == "soulbound")
+    response["meta"]["totalGolden"] = sum(1 for n in inventory if n["stickerType"] == "golden")
+    return response
 
 
 # ── GET /fan/{wallet}/pending ─────────────────────────────────────
@@ -122,30 +130,39 @@ async def get_pending_nfts(
     )
     pending = result.scalars().all()
 
+    # Batch-load templates to avoid N+1 queries
+    template_ids = {nft.template_id for nft in pending}
+    templates_by_id = {}
+    if template_ids:
+        templates_result = await db.execute(
+            select(StickerTemplate).where(StickerTemplate.id.in_(template_ids))
+        )
+        templates = templates_result.scalars().all()
+        templates_by_id = {t.id: t for t in templates}
+
     items = []
     for nft in pending:
-        template_result = await db.execute(
-            select(StickerTemplate).where(
-                StickerTemplate.id == nft.template_id
-            )
+        template = templates_by_id.get(nft.template_id)
+
+        items.append(
+            {
+                "id": nft.id,
+                "assetId": nft.asset_id,
+                "stickerType": nft.sticker_type,
+                "mintedAt": nft.minted_at.isoformat() if nft.minted_at else None,
+                "templateName": template.name if template else None,
+                "imageUrl": template.image_url if template else None,
+                "creatorWallet": template.creator_wallet if template else None,
+            }
         )
-        template = template_result.scalar_one_or_none()
 
-        items.append({
-            "id": nft.id,
-            "assetId": nft.asset_id,
-            "stickerType": nft.sticker_type,
-            "mintedAt": nft.minted_at.isoformat() if nft.minted_at else None,
-            "templateName": template.name if template else None,
-            "imageUrl": template.image_url if template else None,
-            "creatorWallet": template.creator_wallet if template else None,
-        })
-
-    return {
-        "wallet": wallet,
-        "pending": items,
-        "total": len(items),
-    }
+    return success_response(
+        data={
+            "wallet": wallet,
+            "pending": items,
+        },
+        meta={"total": len(items)},
+    )
 
 
 # ── POST /fan/{wallet}/claim/{nft_id} ────────────────────────────
@@ -234,41 +251,30 @@ async def get_fan_stats(
     - NFTs collected (by type)
     - Recent tip history
     """
-    # Total tips and ALGO spent
+    # Phase 6: Optimize - combine multiple queries into single aggregate query
+    # Total tips, ALGO spent, and unique creators in one query
     tips_result = await db.execute(
         select(
-            func.count(Transaction.id),
-            func.coalesce(func.sum(Transaction.amount_micro), 0),
+            func.count(Transaction.id).label("tip_count"),
+            func.coalesce(func.sum(Transaction.amount_micro), 0).label("total_micro"),
+            func.count(distinct(Transaction.creator_wallet)).label("unique_creators"),
         ).where(Transaction.fan_wallet == wallet)
     )
     tip_row = tips_result.one()
-    total_tips = tip_row[0]
-    total_algo_spent = tip_row[1] / 1_000_000  # microAlgos -> ALGO
+    total_tips = tip_row.tip_count or 0
+    total_algo_spent = (tip_row.total_micro or 0) / 1_000_000  # microAlgos -> ALGO
+    unique_creators = tip_row.unique_creators or 0
 
-    # Unique creators supported
-    creators_result = await db.execute(
-        select(func.count(distinct(Transaction.creator_wallet))).where(
-            Transaction.fan_wallet == wallet
-        )
+    # Phase 6: Optimize - combine NFT counts by type into single query with conditional aggregation
+    nft_counts_result = await db.execute(
+        select(
+            func.sum(case((NFT.sticker_type == "soulbound", 1), else_=0)).label("soulbound_count"),
+            func.sum(case((NFT.sticker_type == "golden", 1), else_=0)).label("golden_count"),
+        ).where(NFT.owner_wallet == wallet)
     )
-    unique_creators = creators_result.scalar() or 0
-
-    # NFT counts by type
-    soulbound_result = await db.execute(
-        select(func.count(NFT.id)).where(
-            NFT.owner_wallet == wallet,
-            NFT.sticker_type == "soulbound",
-        )
-    )
-    total_soulbound = soulbound_result.scalar() or 0
-
-    golden_result = await db.execute(
-        select(func.count(NFT.id)).where(
-            NFT.owner_wallet == wallet,
-            NFT.sticker_type == "golden",
-        )
-    )
-    total_golden = golden_result.scalar() or 0
+    nft_row = nft_counts_result.one()
+    total_soulbound = nft_row.soulbound_count or 0
+    total_golden = nft_row.golden_count or 0
 
     # Average tip amount
     avg_tip = total_algo_spent / total_tips if total_tips > 0 else 0.0
@@ -397,51 +403,75 @@ async def get_creator_leaderboard(
     )
     fan_rows = fans_result.all()
 
-    # Enrich with NFT counts and usernames
+    fan_wallets = [row[0] for row in fan_rows]
+
+    # Batch-load NFT counts per fan for this creator
+    nft_counts_by_fan = {}
+    if fan_wallets:
+        nft_counts_result = await db.execute(
+            select(
+                NFT.owner_wallet,
+                func.count(NFT.id).label("nft_count"),
+            )
+            .join(
+                StickerTemplate,
+                NFT.template_id == StickerTemplate.id,
+            )
+            .where(
+                NFT.owner_wallet.in_(fan_wallets),
+                StickerTemplate.creator_wallet == creator_wallet,
+            )
+            .group_by(NFT.owner_wallet)
+        )
+        for owner_wallet, nft_count in nft_counts_result.all():
+            nft_counts_by_fan[owner_wallet] = nft_count or 0
+
+    # Batch-load usernames
+    usernames_by_wallet = {}
+    if fan_wallets:
+        usernames_result = await db.execute(
+            select(User.wallet_address, User.username).where(
+                User.wallet_address.in_(fan_wallets)
+            )
+        )
+        for wallet_addr, username in usernames_result.all():
+            usernames_by_wallet[wallet_addr] = username
+
+    # Build leaderboard
     leaderboard = []
     for rank, row in enumerate(fan_rows, start=1):
         fan_wallet = row[0]
         tip_count = row[1]
         total_algo = round(row[2] / 1_000_000, 6) if row[2] else 0.0
+        nft_count = nft_counts_by_fan.get(fan_wallet, 0)
+        username = usernames_by_wallet.get(fan_wallet)
 
-        # Count NFTs this fan owns from this creator's templates
-        nft_count_result = await db.execute(
-            select(func.count(NFT.id)).join(
-                StickerTemplate,
-                NFT.template_id == StickerTemplate.id,
-            ).where(
-                NFT.owner_wallet == fan_wallet,
-                StickerTemplate.creator_wallet == creator_wallet,
-            )
+        leaderboard.append(
+            {
+                "rank": rank,
+                "fanWallet": fan_wallet,
+                "username": username,
+                "tipCount": tip_count,
+                "totalAlgo": round(total_algo, 6),
+                "nftCount": nft_count,
+            }
         )
-        nft_count = nft_count_result.scalar() or 0
-
-        # Get username if set
-        user_result = await db.execute(
-            select(User.username).where(User.wallet_address == fan_wallet)
-        )
-        username = user_result.scalar_one_or_none()
-
-        leaderboard.append({
-            "rank": rank,
-            "fanWallet": fan_wallet,
-            "username": username,
-            "tipCount": tip_count,
-            "totalAlgo": round(total_algo, 6),
-            "nftCount": nft_count,
-        })
 
     # Creator summary stats
     total_fans = len(fan_rows)
     total_algo_received = sum(entry["totalAlgo"] for entry in leaderboard)
 
-    return {
-        "creatorWallet": creator_wallet,
-        "creatorUsername": creator.username,
-        "totalFans": total_fans,
-        "totalAlgoReceived": round(total_algo_received, 6),
-        "leaderboard": leaderboard,
-    }
+    return success_response(
+        data={
+            "creatorWallet": creator_wallet,
+            "creatorUsername": creator.username,
+            "leaderboard": leaderboard,
+        },
+        meta={
+            "totalFans": total_fans,
+            "totalAlgoReceived": round(total_algo_received, 6),
+        },
+    )
 
 
 # ── GET /leaderboard/global/top-creators ──────────────────────────
@@ -468,36 +498,51 @@ async def get_global_top_creators(
     )
     creator_rows = creators_result.all()
 
-    leaderboard = []
-    for rank, row in enumerate(creator_rows, start=1):
-        creator_wallet = row[0]
+    creator_wallets = [row[0] for row in creator_rows]
 
-        # Get username
-        user_result = await db.execute(
-            select(User.username).where(User.wallet_address == creator_wallet)
+    # Batch-load usernames
+    usernames_by_wallet = {}
+    if creator_wallets:
+        usernames_result = await db.execute(
+            select(User.wallet_address, User.username).where(
+                User.wallet_address.in_(creator_wallets)
+            )
         )
-        username = user_result.scalar_one_or_none()
+        for wallet_addr, username in usernames_result.all():
+            usernames_by_wallet[wallet_addr] = username
 
-        # Get active contract info
-        contract_result = await db.execute(
-            select(Contract.app_id).where(
-                Contract.creator_wallet == creator_wallet,
+    # Batch-load active contract app_ids
+    app_ids_by_creator = {}
+    if creator_wallets:
+        contracts_result = await db.execute(
+            select(Contract.creator_wallet, Contract.app_id).where(
+                Contract.creator_wallet.in_(creator_wallets),
                 Contract.active == True,
             )
         )
-        app_id = contract_result.scalar_one_or_none()
+        for wallet_addr, app_id in contracts_result.all():
+            # If multiple active rows somehow exist, the last one wins; that's fine for stats.
+            app_ids_by_creator[wallet_addr] = app_id
 
-        leaderboard.append({
-            "rank": rank,
-            "creatorWallet": creator_wallet,
-            "username": username,
-            "appId": app_id,
-            "tipCount": row[1],
-            "totalAlgoReceived": round(float(row[2]) / 1_000_000, 6) if row[2] else 0.0,
-            "uniqueFans": row[3],
-        })
+    leaderboard = []
+    for rank, row in enumerate(creator_rows, start=1):
+        creator_wallet = row[0]
+        username = usernames_by_wallet.get(creator_wallet)
+        app_id = app_ids_by_creator.get(creator_wallet)
 
-    return {
-        "leaderboard": leaderboard,
-        "total": len(leaderboard),
-    }
+        leaderboard.append(
+            {
+                "rank": rank,
+                "creatorWallet": creator_wallet,
+                "username": username,
+                "appId": app_id,
+                "tipCount": row[1],
+                "totalAlgoReceived": round(float(row[2]) / 1_000_000, 6) if row[2] else 0.0,
+                "uniqueFans": row[3],
+            }
+        )
+
+    return success_response(
+        data={"leaderboard": leaderboard},
+        meta={"total": len(leaderboard)},
+    )

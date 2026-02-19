@@ -22,15 +22,14 @@ Endpoints:
 """
 import logging
 
-from algosdk import transaction
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from algorand_client import algorand_client
 from config import settings
 from database import get_db
 from middleware.rate_limit import rate_limit
+from services import payment_service
 from services import transak_service
 from utils.validators import validate_algorand_address
 
@@ -239,24 +238,16 @@ async def simulate_fund_wallet(
     logger.info(f"  🎮 Simulated funding: {amount} ALGO → {wallet[:12]}...")
 
     try:
-        # Security fix I1 + H4: Use singleton client + cached key
-        client = algorand_client.client
         private_key = settings.platform_private_key
         amount_micro = int(amount * 1_000_000)
 
-        # Build, sign, send payment
-        sp = client.suggested_params()
-        txn = transaction.PaymentTxn(
-            sender=settings.platform_wallet,
-            sp=sp,
-            receiver=wallet,
-            amt=amount_micro,
+        tx_id = payment_service.send_payment(
+            sender_address=settings.platform_wallet,
+            sender_private_key=private_key,
+            receiver_address=wallet,
+            amount_micro=amount_micro,
             note=b"FanForge Demo Funding",
         )
-
-        signed = txn.sign(private_key)
-        tx_id = client.send_transaction(signed)
-        transaction.wait_for_confirmation(client, tx_id, 4)
 
         logger.info(f"  ✅ Simulated funding complete: {tx_id}")
 

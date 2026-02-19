@@ -10,6 +10,8 @@ Flow:
     3. Platform wallet mints the ASA with the IPFS metadata URL
     4. Platform wallet opts-in fan and transfers the NFT
     5. Returns asset_id for DB storage
+
+Phase 7: Async wrappers run blocking algod calls in thread pool to avoid blocking event loop.
 """
 import logging
 from typing import Optional
@@ -18,6 +20,7 @@ from algosdk import account
 
 from algorand_client import algorand_client
 from config import settings
+from services.async_executor import run_blocking
 from sticker_scripts.mint_soulbound import mint_soulbound
 from sticker_scripts.mint_golden import mint_golden
 from sticker_scripts.optin_asset import optin_asset
@@ -36,6 +39,44 @@ def _get_platform_account() -> dict:
     private_key = settings.platform_private_key  # Cached in config.py
     address = account.address_from_private_key(private_key)
     return {"address": address, "private_key": private_key}
+
+
+async def mint_soulbound_sticker_async(
+    name: str,
+    metadata_url: str,
+    unit_name: str = "STICKER",
+    metadata_hash: Optional[bytes] = None,
+) -> int:
+    """
+    Async wrapper: runs blocking mint in thread pool (Phase 7).
+    """
+    return await run_blocking(
+        _mint_soulbound_sync,
+        name=name,
+        metadata_url=metadata_url,
+        unit_name=unit_name,
+        metadata_hash=metadata_hash,
+    )
+
+
+def _mint_soulbound_sync(
+    name: str,
+    metadata_url: str,
+    unit_name: str = "STICKER",
+    metadata_hash: Optional[bytes] = None,
+) -> int:
+    """Synchronous mint (used by async wrapper)."""
+    platform = _get_platform_account()
+    client = algorand_client.client
+    return mint_soulbound(
+        client=client,
+        sender_address=platform["address"],
+        sender_private_key=platform["private_key"],
+        name=name,
+        unit_name=unit_name,
+        url=metadata_url,
+        metadata_hash=metadata_hash,
+    )
 
 
 def mint_soulbound_sticker(
@@ -76,6 +117,44 @@ def mint_soulbound_sticker(
 
     logger.info(f"  Soulbound NFT minted — Asset ID: {asset_id}")
     return asset_id
+
+
+async def mint_golden_sticker_async(
+    name: str,
+    metadata_url: str,
+    unit_name: str = "GOLDEN",
+    metadata_hash: Optional[bytes] = None,
+) -> int:
+    """
+    Async wrapper: runs blocking mint in thread pool (Phase 7).
+    """
+    return await run_blocking(
+        _mint_golden_sync,
+        name=name,
+        metadata_url=metadata_url,
+        unit_name=unit_name,
+        metadata_hash=metadata_hash,
+    )
+
+
+def _mint_golden_sync(
+    name: str,
+    metadata_url: str,
+    unit_name: str = "GOLDEN",
+    metadata_hash: Optional[bytes] = None,
+) -> int:
+    """Synchronous mint (used by async wrapper)."""
+    platform = _get_platform_account()
+    client = algorand_client.client
+    return mint_golden(
+        client=client,
+        sender_address=platform["address"],
+        sender_private_key=platform["private_key"],
+        name=name,
+        unit_name=unit_name,
+        url=metadata_url,
+        metadata_hash=metadata_hash,
+    )
 
 
 def mint_golden_sticker(
@@ -152,6 +231,22 @@ def mint_sticker(
             unit_name=unit_name or "STICKER",
             metadata_hash=metadata_hash,
         )
+
+
+async def send_nft_to_fan_async(
+    asset_id: int,
+    fan_wallet: str,
+    fan_private_key: Optional[str] = None,
+) -> dict:
+    """
+    Async wrapper: runs blocking transfer in thread pool (Phase 7).
+    """
+    return await run_blocking(
+        send_nft_to_fan,
+        asset_id=asset_id,
+        fan_wallet=fan_wallet,
+        fan_private_key=fan_private_key,
+    )
 
 
 def send_nft_to_fan(
