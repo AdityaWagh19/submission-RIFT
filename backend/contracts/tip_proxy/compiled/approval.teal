@@ -1,0 +1,239 @@
+#pragma version 8
+txn ApplicationID
+int 0
+==
+bnz main_l23
+txn OnCompletion
+int DeleteApplication
+==
+bnz main_l22
+txn OnCompletion
+int UpdateApplication
+==
+bnz main_l21
+txn OnCompletion
+int OptIn
+==
+bnz main_l20
+txn OnCompletion
+int CloseOut
+==
+bnz main_l19
+txn OnCompletion
+int NoOp
+==
+bnz main_l7
+err
+main_l7:
+txna ApplicationArgs 0
+byte "tip"
+==
+bnz main_l15
+txna ApplicationArgs 0
+byte "update_min_tip"
+==
+bnz main_l14
+txna ApplicationArgs 0
+byte "pause"
+==
+bnz main_l13
+txna ApplicationArgs 0
+byte "unpause"
+==
+bnz main_l12
+err
+main_l12:
+txn Sender
+byte "creator_address"
+app_global_get
+==
+txn Sender
+byte "platform_address"
+app_global_get
+==
+||
+assert
+byte "paused"
+int 0
+app_global_put
+int 1
+return
+main_l13:
+txn Sender
+byte "creator_address"
+app_global_get
+==
+txn Sender
+byte "platform_address"
+app_global_get
+==
+||
+assert
+byte "paused"
+int 1
+app_global_put
+int 1
+return
+main_l14:
+txn Sender
+byte "creator_address"
+app_global_get
+==
+assert
+txn NumAppArgs
+int 2
+==
+assert
+byte "min_tip_amount"
+txna ApplicationArgs 1
+btoi
+app_global_put
+int 1
+return
+main_l15:
+byte "paused"
+app_global_get
+int 1
+==
+!
+assert
+global GroupSize
+int 2
+==
+assert
+txn GroupIndex
+int 1
+-
+gtxns TypeEnum
+int pay
+==
+assert
+txn GroupIndex
+int 1
+-
+gtxns Receiver
+global CurrentApplicationAddress
+==
+assert
+txn GroupIndex
+int 1
+-
+gtxns Sender
+txn Sender
+==
+assert
+txn GroupIndex
+int 1
+-
+gtxns Amount
+byte "min_tip_amount"
+app_global_get
+>=
+assert
+itxn_begin
+int pay
+itxn_field TypeEnum
+byte "creator_address"
+app_global_get
+itxn_field Receiver
+txn GroupIndex
+int 1
+-
+gtxns Amount
+itxn_field Amount
+int 0
+itxn_field Fee
+itxn_submit
+txn Sender
+txn GroupIndex
+int 1
+-
+gtxns Amount
+itob
+concat
+txn NumAppArgs
+int 2
+>=
+bnz main_l18
+byte ""
+main_l17:
+concat
+log
+byte "total_tips"
+byte "total_tips"
+app_global_get
+int 1
++
+app_global_put
+byte "total_amount"
+byte "total_amount"
+app_global_get
+txn GroupIndex
+int 1
+-
+gtxns Amount
++
+app_global_put
+int 1
+return
+main_l18:
+txna ApplicationArgs 1
+b main_l17
+main_l19:
+int 1
+return
+main_l20:
+int 1
+return
+main_l21:
+txn Sender
+byte "creator_address"
+app_global_get
+==
+txn Sender
+byte "platform_address"
+app_global_get
+==
+||
+return
+main_l22:
+txn Sender
+byte "creator_address"
+app_global_get
+==
+txn Sender
+byte "platform_address"
+app_global_get
+==
+||
+return
+main_l23:
+txn NumAppArgs
+int 4
+==
+assert
+byte "creator_address"
+txna ApplicationArgs 0
+app_global_put
+byte "platform_address"
+txna ApplicationArgs 1
+app_global_put
+byte "min_tip_amount"
+txna ApplicationArgs 2
+btoi
+app_global_put
+byte "contract_version"
+txna ApplicationArgs 3
+btoi
+app_global_put
+byte "total_tips"
+int 0
+app_global_put
+byte "total_amount"
+int 0
+app_global_put
+byte "paused"
+int 0
+app_global_put
+int 1
+return

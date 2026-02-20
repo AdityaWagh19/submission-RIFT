@@ -1,0 +1,15 @@
+{
+  "name": "TipProxy",
+  "description": "Per-creator tip proxy \u2014 validates payments, forwards ALGO via inner transaction, emits structured logs for backend listener.",
+  "version": "1.0.0",
+  "global_uints": 5,
+  "global_bytes": 2,
+  "local_uints": 0,
+  "local_bytes": 0,
+  "methods": [
+    "tip",
+    "update_min_tip",
+    "pause",
+    "unpause"
+  ]
+}

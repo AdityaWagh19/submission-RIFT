@@ -1,0 +1,301 @@
+#pragma version 8
+txn ApplicationID
+int 0
+==
+bnz main_l30
+txn OnCompletion
+int DeleteApplication
+==
+bnz main_l29
+txn OnCompletion
+int UpdateApplication
+==
+bnz main_l28
+txn OnCompletion
+int OptIn
+==
+bnz main_l27
+txn OnCompletion
+int CloseOut
+==
+bnz main_l26
+txn OnCompletion
+int NoOp
+==
+bnz main_l7
+err
+main_l7:
+txna ApplicationArgs 0
+byte "mint_butki"
+==
+bnz main_l25
+txna ApplicationArgs 0
+byte "mint_bauni"
+==
+bnz main_l22
+txna ApplicationArgs 0
+byte "mint_shawty"
+==
+bnz main_l21
+txna ApplicationArgs 0
+byte "burn_shawty"
+==
+bnz main_l20
+txna ApplicationArgs 0
+byte "check_membership"
+==
+bnz main_l17
+txna ApplicationArgs 0
+byte "pause"
+==
+bnz main_l16
+txna ApplicationArgs 0
+byte "unpause"
+==
+bnz main_l15
+err
+main_l15:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+assert
+byte "paused"
+int 0
+app_global_put
+int 1
+return
+main_l16:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+assert
+byte "paused"
+int 1
+app_global_put
+int 1
+return
+main_l17:
+txn NumAppArgs
+int 2
+==
+assert
+txna ApplicationArgs 1
+byte "bauni_expiry"
+app_local_get
+global LatestTimestamp
+>
+bnz main_l19
+int 0
+return
+main_l19:
+int 1
+return
+main_l20:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+assert
+byte "paused"
+app_global_get
+int 1
+==
+!
+assert
+txn NumAppArgs
+int 3
+==
+assert
+txna ApplicationArgs 1
+byte "shawty_count"
+app_local_get
+int 0
+>
+assert
+txna ApplicationArgs 1
+byte "shawty_count"
+txna ApplicationArgs 1
+byte "shawty_count"
+app_local_get
+int 1
+-
+app_local_put
+txna ApplicationArgs 1
+byte "total_burned"
+txna ApplicationArgs 1
+byte "total_burned"
+app_local_get
+int 1
++
+app_local_put
+byte "SHAWTY_BURN"
+txna ApplicationArgs 1
+concat
+txna ApplicationArgs 2
+concat
+log
+int 1
+return
+main_l21:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+assert
+byte "paused"
+app_global_get
+int 1
+==
+!
+assert
+txn NumAppArgs
+int 3
+==
+assert
+txna ApplicationArgs 1
+byte "shawty_count"
+txna ApplicationArgs 1
+byte "shawty_count"
+app_local_get
+int 1
++
+app_local_put
+byte "total_shawty_minted"
+byte "total_shawty_minted"
+app_global_get
+int 1
++
+app_global_put
+byte "SHAWTY_MINT"
+txna ApplicationArgs 1
+concat
+txna ApplicationArgs 2
+concat
+log
+int 1
+return
+main_l22:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+assert
+byte "paused"
+app_global_get
+int 1
+==
+!
+assert
+txn NumAppArgs
+int 3
+==
+assert
+txna ApplicationArgs 2
+btoi
+txna ApplicationArgs 1
+byte "bauni_expiry"
+app_local_get
+>
+bnz main_l24
+main_l23:
+byte "total_bauni_minted"
+byte "total_bauni_minted"
+app_global_get
+int 1
++
+app_global_put
+byte "BAUNI_MINT"
+txna ApplicationArgs 1
+concat
+txna ApplicationArgs 2
+concat
+log
+int 1
+return
+main_l24:
+txna ApplicationArgs 1
+byte "bauni_expiry"
+txna ApplicationArgs 2
+btoi
+app_local_put
+b main_l23
+main_l25:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+assert
+byte "paused"
+app_global_get
+int 1
+==
+!
+assert
+txn NumAppArgs
+int 3
+==
+assert
+txna ApplicationArgs 1
+byte "butki_count"
+txna ApplicationArgs 1
+byte "butki_count"
+app_local_get
+int 1
++
+app_local_put
+byte "total_butki_minted"
+byte "total_butki_minted"
+app_global_get
+int 1
++
+app_global_put
+byte "BUTKI_MINT"
+txna ApplicationArgs 1
+concat
+txna ApplicationArgs 2
+concat
+log
+int 1
+return
+main_l26:
+int 1
+return
+main_l27:
+int 1
+return
+main_l28:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+return
+main_l29:
+txn Sender
+byte "platform_address"
+app_global_get
+==
+return
+main_l30:
+txn NumAppArgs
+int 1
+==
+assert
+byte "platform_address"
+txna ApplicationArgs 0
+app_global_put
+byte "total_butki_minted"
+int 0
+app_global_put
+byte "total_bauni_minted"
+int 0
+app_global_put
+byte "total_shawty_minted"
+int 0
+app_global_put
+byte "paused"
+int 0
+app_global_put
+int 1
+return

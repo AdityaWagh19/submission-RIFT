@@ -1,0 +1,18 @@
+{
+  "name": "NFTController",
+  "description": "Enforces transfer, mint, and burn rules for Butki (loyalty), Bauni (membership), and Shawty (utility) NFTs.",
+  "version": "1.0.0",
+  "global_uints": 4,
+  "global_bytes": 1,
+  "local_uints": 4,
+  "local_bytes": 0,
+  "methods": [
+    "mint_butki",
+    "mint_bauni",
+    "mint_shawty",
+    "burn_shawty",
+    "check_membership",
+    "pause",
+    "unpause"
+  ]
+}
