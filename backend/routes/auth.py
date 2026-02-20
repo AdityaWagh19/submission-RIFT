@@ -145,35 +145,38 @@ async def verify_challenge(
         try:
             from algosdk import util as algo_util
             
-            # Pera/Defly wallets sign with an "MX" prefix for data (spec: ARC-0014)
-            # We must verify against (b"MX" + nonce_bytes)
-            message_with_prefix = b"MX" + request.nonce.encode("utf-8")
-            
-            # Correct use for Render's SDK version:
-            # verify_bytes(message_bytes, signature_bytes, address_string)
+            # algosdk.util.verify_bytes:
+            # 1. message: raw bytes (it prepends b"MX" internally)
+            # 2. signature: base64 STRING
+            # 3. public_key: 58-character address STRING
             ok = algo_util.verify_bytes(
-                message_with_prefix,
-                sig_bytes,
-                request.wallet_address  # 58 character string
+                request.nonce.encode("utf-8"),
+                request.signature,
+                request.wallet_address
             )
             if ok:
-                logger.info(f"Signature verification (with MX prefix) succeeded for {request.wallet_address}")
+                logger.info(f"algosdk verify_bytes succeeded for {request.wallet_address}")
         except Exception as e:
-            logger.warning(f"Signature verification (MX) attempt failed for {request.wallet_address}: {e}")
+            logger.warning(f"algosdk verify_bytes failed: {e}")
 
         if not ok:
-            # Fallback: try raw Ed25519 verification without MX prefix (SDK dependency free)
+            # Fallback: Manual Ed25519 verification (SDK dependency free)
             try:
                 from nacl.signing import VerifyKey
                 from algosdk import encoding
 
+                # Pera/Defly use ARC-0014: b"MX" + data
+                message_with_prefix = b"MX" + request.nonce.encode("utf-8")
+                
                 public_key_bytes = encoding.decode_address(request.wallet_address)
                 vk = VerifyKey(public_key_bytes)
-                vk.verify(request.nonce.encode("utf-8"), sig_bytes)
+                
+                # nacl.verify expects (message_bytes, signature_bytes)
+                vk.verify(message_with_prefix, sig_bytes)
                 ok = True
-                logger.info("Fallback NaCl verification (no MX prefix) succeeded")
+                logger.info(f"Fallback NaCl verification succeeded for {request.wallet_address}")
             except Exception as e2:
-                logger.warning(f"All signature verification methods failed for {request.wallet_address}")
+                logger.warning(f"All verification methods failed: {e2}")
 
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid signature for wallet.")
