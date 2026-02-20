@@ -144,19 +144,26 @@ async def verify_challenge(
 
         try:
             from algosdk import util as algo_util
+            from algosdk import encoding
 
-            # verify_bytes prepends b"MX" internally — matches Pera signData behavior
+            # Pera/Defly wallets sign with an "MX" prefix for data (spec: ARC-0014)
+            # We must verify against (b"MX" + nonce_bytes)
+            message_with_prefix = b"MX" + request.nonce.encode("utf-8")
+            public_key = encoding.decode_address(request.wallet_address)
+
+            # verify_bytes(message, signature, public_key)
             ok = algo_util.verify_bytes(
-                message=request.nonce.encode("utf-8"),
-                signature=sig_bytes,
-                address=request.wallet_address,
+                message_with_prefix,
+                sig_bytes,
+                public_key,
             )
-            logger.info(f"verify_bytes (with MX prefix) result: {ok}")
+            if ok:
+                logger.info("Signature verification (with MX prefix) succeeded")
         except Exception as e:
-            logger.warning(f"verify_bytes (MX) failed: {e}")
+            logger.warning(f"Signature verification (MX) failed: {e}")
 
         if not ok:
-            # Fallback: try raw Ed25519 verification without MX prefix
+            # Fallback: try raw Ed25519 verification without MX prefix (SDK dependency free)
             try:
                 from nacl.signing import VerifyKey
                 from algosdk import encoding
@@ -164,9 +171,9 @@ async def verify_challenge(
                 vk = VerifyKey(encoding.decode_address(request.wallet_address))
                 vk.verify(request.nonce.encode("utf-8"), sig_bytes)
                 ok = True
-                logger.info("Raw NaCl verification (no MX prefix) succeeded")
+                logger.info("Fallback NaCl verification (no MX prefix) succeeded")
             except Exception as e2:
-                logger.warning(f"Raw NaCl verification also failed: {e2}")
+                logger.warning(f"All signature verification methods failed for {request.wallet_address}")
 
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid signature for wallet.")
