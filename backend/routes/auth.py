@@ -144,23 +144,22 @@ async def verify_challenge(
 
         try:
             from algosdk import util as algo_util
-            from algosdk import encoding
-
+            
             # Pera/Defly wallets sign with an "MX" prefix for data (spec: ARC-0014)
             # We must verify against (b"MX" + nonce_bytes)
             message_with_prefix = b"MX" + request.nonce.encode("utf-8")
-            public_key = encoding.decode_address(request.wallet_address)
-
-            # verify_bytes(message, signature, public_key)
+            
+            # Correct use for Render's SDK version:
+            # verify_bytes(message_bytes, signature_bytes, address_string)
             ok = algo_util.verify_bytes(
                 message_with_prefix,
                 sig_bytes,
-                public_key,
+                request.wallet_address  # 58 character string
             )
             if ok:
-                logger.info("Signature verification (with MX prefix) succeeded")
+                logger.info(f"Signature verification (with MX prefix) succeeded for {request.wallet_address}")
         except Exception as e:
-            logger.warning(f"Signature verification (MX) failed: {e}")
+            logger.warning(f"Signature verification (MX) attempt failed for {request.wallet_address}: {e}")
 
         if not ok:
             # Fallback: try raw Ed25519 verification without MX prefix (SDK dependency free)
@@ -168,7 +167,8 @@ async def verify_challenge(
                 from nacl.signing import VerifyKey
                 from algosdk import encoding
 
-                vk = VerifyKey(encoding.decode_address(request.wallet_address))
+                public_key_bytes = encoding.decode_address(request.wallet_address)
+                vk = VerifyKey(public_key_bytes)
                 vk.verify(request.nonce.encode("utf-8"), sig_bytes)
                 ok = True
                 logger.info("Fallback NaCl verification (no MX prefix) succeeded")
